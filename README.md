@@ -16,6 +16,7 @@ sharpens the longer the camera holds still.
 - **Library first.** `pip install` and `import neraulgraphics`, or `find_package(neraulgraphics)` in C++. No window or engine to adopt.
 - **Meshes and instancing.** Share triangle meshes between any number of instances. Moving an instance only updates a small BVH, so thousands of moving bodies stay cheap.
 - **Dynamic scenes.** `set_instance_transforms()` takes a pose per instance each frame, with poses as position plus `(x, y, z, w)` quaternion, the convention Warp, MuJoCo and Newton use.
+- **Sensors for robotics and RL.** Depth, surface-normal and object-ID (segmentation) images, and ray queries for LiDAR and range sensors, handed to PyTorch, JAX or Warp on the GPU with no copy.
 - **Load models.** `ng.load("model.glb")` reads glTF, GLB and OBJ with materials, colour textures, smooth normals and node hierarchies.
 - **Newton and MuJoCo adapters.** `NewtonRenderer(model).render(state)` and `MuJoCoRenderer(model).render(data)`: shapes become instances once, and each frame only poses are updated.
 - **Reflections, soft shadows, anti-aliasing**, plus progressive refinement while the camera is still.
@@ -60,6 +61,34 @@ for frame in range(64):                  # more frames, smoother image
 
 Move things every frame with `renderer.set_instance_transforms(matrices)`, an
 `(N, 3, 4)` float array, then render with `frame=0`.
+
+## Sensors: depth, segmentation, LiDAR
+
+```python
+out = renderer.render_frame(camera, rgb=True, depth=True, normals=True, object_ids=True)
+out["depth"]        # (H, W) float32, along the view axis, inf where nothing is hit
+out["object_ids"]   # (H, W) int32: ng.OBJECT_NONE, OBJECT_SPHERE + i, OBJECT_FLOOR, OBJECT_INSTANCE + i
+hits = renderer.cast_rays(origins, directions, max_distance=30.0)   # (N, 3) arrays: a LiDAR sweep
+hits["distance"], hits["normal"], hits["object_id"]
+```
+
+Depth, normals and IDs are one exact ray through each pixel's middle, so object edges are not blurred
+into false depths, and asking for fewer images is faster (a depth-only frame does no shading). On a GPU,
+`zero_copy=True` returns the images where they already are, as CUDA arrays for the next library, with
+nothing copied:
+
+```python
+out = renderer.render_frame(camera, depth=True, object_ids=True, zero_copy=True)
+depth = torch.from_dlpack(out["depth"])     # a torch.cuda tensor; also jax.dlpack, warp.from_dlpack, cupy
+hits = renderer.cast_rays(origins_tensor, directions_tensor)   # torch tensors in, CUDA arrays out
+```
+
+These views are overwritten by the next render, so use or `.clone()` them first. In a quick test at
+1280x720, depth-only frames ran about 26 times faster this way than copied to NumPy; the scene was
+trivial, so treat that as the saving from the copies, not a benchmark. The Newton and MuJoCo adapters have
+the same `render_frame`, plus `update(state)` to place the shapes for a ray query without drawing, and
+tell you which object ID is which shape. See
+[examples/sensor_images.py](https://github.com/aneangel/neraulGraphics/blob/main/examples/sensor_images.py).
 
 ## Loading a model
 

@@ -12,6 +12,13 @@ namespace neraulgraphics {
 constexpr int MAX_SPHERES = 32;
 constexpr int MAX_LIGHTS = 8;
 
+// What an object-ID (segmentation) image holds at a pixel, or what a ray query reports: which
+// object was hit. Fixed numbers, so an ID means the same thing whatever else is in the scene.
+constexpr int OBJECT_NONE = 0;                             // nothing: the ray left the scene
+constexpr int OBJECT_SPHERE = 1;                           // sphere i is OBJECT_SPHERE + i
+constexpr int OBJECT_FLOOR = OBJECT_SPHERE + MAX_SPHERES;  // the floor
+constexpr int OBJECT_INSTANCE = OBJECT_FLOOR + 1;          // mesh instance i is OBJECT_INSTANCE + i
+
 struct Vec3 {
     float x;
     float y;

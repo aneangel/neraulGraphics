@@ -43,6 +43,33 @@ __global__ void render_kernel(const __grid_constant__ SceneParams s, float4 *acc
     render_pixel(s, accum, out, x, y, width, height, cam, frame, spp);
 }
 
+// Depth, normal and object ID for each pixel: see aov_pixel.
+__global__ void aov_kernel(const __grid_constant__ SceneParams s, const AovBuffers out, const int width,
+    const int height, const Camera cam) {
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= width || y >= height) return;
+    aov_pixel(s, out, x, y, width, height, cam);
+}
+
+// 0xAARRGGBB pixels to red, green, blue bytes.
+__global__ void rgb_kernel(const uint32_t *argb, uint8_t *rgb, const int pixels) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= pixels) return;
+    const uint32_t p = argb[i];
+    rgb[3 * i] = static_cast<uint8_t>(p >> 16);
+    rgb[3 * i + 1] = static_cast<uint8_t>(p >> 8);
+    rgb[3 * i + 2] = static_cast<uint8_t>(p);
+}
+
+// One thread per ray.
+__global__ void ray_kernel(const __grid_constant__ SceneParams s, const float *origins, const float *directions,
+    const float max_distance, const int count, float *distance, float *normal, int32_t *object_id) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= count) return;
+    cast_ray(s, origins, directions, max_distance, i, distance, normal, object_id);
+}
+
 }  // namespace
 }  // namespace neraulgraphics::device
 
@@ -68,6 +95,20 @@ struct CudaResources {
     device::Instance *d_instances_ = nullptr;
     float4 *d_attributes_ = nullptr;
 
+    // What render_frame() hands out and what ray queries read and write, allocated when first needed
+    // and kept (a ray query grows them to the largest batch seen).
+    uint8_t *d_rgb_ = nullptr;
+    float *d_depth_ = nullptr;
+    float *d_normal_ = nullptr;
+    int32_t *d_id_ = nullptr;
+    float *d_ray_origin_ = nullptr;
+    float *d_ray_direction_ = nullptr;
+    float *d_hit_distance_ = nullptr;
+    float *d_hit_normal_ = nullptr;
+    int32_t *d_hit_id_ = nullptr;
+    int ray_capacity_ = 0;
+    int ray_input_capacity_ = 0;
+
     // d_textures_ is the array of handles the kernel indexes.
     std::vector<cudaArray_t> texture_arrays_;
     std::vector<cudaTextureObject_t> texture_objects_;
@@ -89,6 +130,15 @@ struct CudaResources {
         cudaFree(d_tlas_instance_);
         cudaFree(d_instances_);
         cudaFree(d_attributes_);
+        cudaFree(d_rgb_);
+        cudaFree(d_depth_);
+        cudaFree(d_normal_);
+        cudaFree(d_id_);
+        cudaFree(d_ray_origin_);
+        cudaFree(d_ray_direction_);
+        cudaFree(d_hit_distance_);
+        cudaFree(d_hit_normal_);
+        cudaFree(d_hit_id_);
         cudaFree(d_textures_);
         for (const cudaTextureObject_t t : texture_objects_) cudaDestroyTextureObject(t);
         for (const cudaArray_t a : texture_arrays_) cudaFreeArray(a);
@@ -109,6 +159,8 @@ public:
         params_.floor = device::to_device(scene.floor);
         params_.sphere_count = static_cast<int>(scene.spheres.size());
         params_.light_count = static_cast<int>(scene.lights.size());
+
+        CUDA_CHECK(cudaGetDevice(&device_id_));  // the GPU this renderer's memory lives on
 
         const size_t pixel_count = static_cast<size_t>(width_) * height_;
         CUDA_CHECK(cudaMalloc(&d_accum_, pixel_count * sizeof(float4)));
@@ -133,22 +185,91 @@ public:
     }
 
     const uint32_t *render(const Camera &camera, const int frame, const int samples_per_frame) override {
-        using device::BLOCK_X;
-        using device::BLOCK_Y;
-        const dim3 block(BLOCK_X, BLOCK_Y);
-        const dim3 grid((width_ + BLOCK_X - 1) / BLOCK_X, (height_ + BLOCK_Y - 1) / BLOCK_Y);
-
         CUDA_CHECK(cudaEventRecord(ev_start_));
-        device::render_kernel<<<grid, block>>>(params_, d_accum_, d_pixels_, width_, height_,
-            device::to_device(camera), frame, samples_per_frame);
-        // Catches a launch that never started. A fault while running surfaces at the copy.
-        CUDA_CHECK(cudaGetLastError());
+        launch_beauty(camera, frame, samples_per_frame);
         CUDA_CHECK(cudaEventRecord(ev_stop_));
 
         CUDA_CHECK(cudaMemcpy(h_pixels_, d_pixels_, static_cast<size_t>(width_) * height_ * sizeof(uint32_t),
             cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaEventElapsedTime(&kernel_ms_, ev_start_, ev_stop_));
         return h_pixels_;
+    }
+
+    Frame render_frame(const Camera &camera, const int frame, const int samples_per_frame,
+        const unsigned outputs) override {
+        const size_t pixels = static_cast<size_t>(width_) * height_;
+        Frame f{Memory::Device, device_id_, width_, height_, nullptr, nullptr, nullptr, nullptr};
+        if (outputs & OUTPUT_RGB) f.rgb = ensure(d_rgb_, pixels * 3);
+        if (outputs & OUTPUT_DEPTH) f.depth = ensure(d_depth_, pixels);
+        if (outputs & OUTPUT_NORMAL) f.normal = ensure(d_normal_, pixels * 3);
+        if (outputs & OUTPUT_OBJECT_ID) f.object_id = ensure(d_id_, pixels);
+
+        CUDA_CHECK(cudaEventRecord(ev_start_));
+        if (outputs & OUTPUT_RGB) {
+            launch_beauty(camera, frame, samples_per_frame);
+            constexpr int THREADS = 256;
+            device::rgb_kernel<<<(static_cast<int>(pixels) + THREADS - 1) / THREADS, THREADS>>>(d_pixels_, d_rgb_,
+                static_cast<int>(pixels));
+            CUDA_CHECK(cudaGetLastError());
+        }
+        if (outputs & (OUTPUT_DEPTH | OUTPUT_NORMAL | OUTPUT_OBJECT_ID)) {
+            const device::AovBuffers aov{d_depth_ && (outputs & OUTPUT_DEPTH) ? d_depth_ : nullptr,
+                d_normal_ && (outputs & OUTPUT_NORMAL) ? d_normal_ : nullptr,
+                d_id_ && (outputs & OUTPUT_OBJECT_ID) ? d_id_ : nullptr};
+            const dim3 block(device::BLOCK_X, device::BLOCK_Y);
+            const dim3 grid((width_ + device::BLOCK_X - 1) / device::BLOCK_X, (height_ + device::BLOCK_Y - 1) / device::BLOCK_Y);
+            device::aov_kernel<<<grid, block>>>(params_, aov, width_, height_, device::to_device(camera));
+            CUDA_CHECK(cudaGetLastError());
+        }
+        CUDA_CHECK(cudaEventRecord(ev_stop_));
+        // The caller reads these from another library's stream, so the work must be done, not just queued.
+        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaEventElapsedTime(&kernel_ms_, ev_start_, ev_stop_));
+        return f;
+    }
+
+    RayHits cast_rays(const float *origins, const float *directions, const int count, const float max_distance,
+        const Memory input_memory) override {
+        if (count == 0) return RayHits{Memory::Device, device_id_, 0, nullptr, nullptr, nullptr};
+        const float *o = origins, *d = directions;
+        if (input_memory == Memory::Host) {
+            // Grown to the largest batch seen, so a steady stream of queries allocates nothing.
+            if (count > ray_input_capacity_) {
+                cudaFree(d_ray_origin_);
+                cudaFree(d_ray_direction_);
+                d_ray_origin_ = d_ray_direction_ = nullptr;
+                ray_input_capacity_ = 0;
+                CUDA_CHECK(cudaMalloc(&d_ray_origin_, static_cast<size_t>(count) * 3 * sizeof(float)));
+                CUDA_CHECK(cudaMalloc(&d_ray_direction_, static_cast<size_t>(count) * 3 * sizeof(float)));
+                ray_input_capacity_ = count;
+            }
+            CUDA_CHECK(cudaMemcpy(d_ray_origin_, origins, static_cast<size_t>(count) * 3 * sizeof(float), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(d_ray_direction_, directions, static_cast<size_t>(count) * 3 * sizeof(float), cudaMemcpyHostToDevice));
+            o = d_ray_origin_;
+            d = d_ray_direction_;
+        }
+        if (count > ray_capacity_) {
+            cudaFree(d_hit_distance_);
+            cudaFree(d_hit_normal_);
+            cudaFree(d_hit_id_);
+            d_hit_distance_ = d_hit_normal_ = nullptr;
+            d_hit_id_ = nullptr;
+            ray_capacity_ = 0;
+            CUDA_CHECK(cudaMalloc(&d_hit_distance_, static_cast<size_t>(count) * sizeof(float)));
+            CUDA_CHECK(cudaMalloc(&d_hit_normal_, static_cast<size_t>(count) * 3 * sizeof(float)));
+            CUDA_CHECK(cudaMalloc(&d_hit_id_, static_cast<size_t>(count) * sizeof(int32_t)));
+            ray_capacity_ = count;
+        }
+        constexpr int THREADS = 128;
+        device::ray_kernel<<<(count + THREADS - 1) / THREADS, THREADS>>>(params_, o, d, max_distance, count,
+            d_hit_distance_, d_hit_normal_, d_hit_id_);
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaDeviceSynchronize());
+        return RayHits{Memory::Device, device_id_, count, d_hit_distance_, d_hit_normal_, d_hit_id_};
+    }
+
+    void copy_to_host(const void *src, void *dst, const size_t bytes) const override {
+        CUDA_CHECK(cudaMemcpy(dst, src, bytes, cudaMemcpyDeviceToHost));
     }
 
     void set_instance_transforms(const std::vector<Transform> &transforms) override {
@@ -162,6 +283,25 @@ public:
     Device device() const override { return Device::Cuda; }
 
 private:
+    // The picture, into d_pixels_ (0xAARRGGBB). Queued, not waited for.
+    void launch_beauty(const Camera &camera, const int frame, const int samples_per_frame) {
+        using device::BLOCK_X;
+        using device::BLOCK_Y;
+        const dim3 block(BLOCK_X, BLOCK_Y);
+        const dim3 grid((width_ + BLOCK_X - 1) / BLOCK_X, (height_ + BLOCK_Y - 1) / BLOCK_Y);
+        device::render_kernel<<<grid, block>>>(params_, d_accum_, d_pixels_, width_, height_,
+            device::to_device(camera), frame, samples_per_frame);
+        // Catches a launch that never started. A fault while running surfaces at the next sync.
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+    // Allocates a buffer the first time it is wanted; its size never changes after that.
+    template <class T>
+    T *ensure(T *&buffer, const size_t count) {
+        if (buffer == nullptr) CUDA_CHECK(cudaMalloc(&buffer, count * sizeof(T)));
+        return buffer;
+    }
+
     // A CUDA array behind a texture object, which does the filtering and the sRGB decode in hardware.
     void upload_texture(const Texture &tex) {
         cudaArray_t array = nullptr;
@@ -238,6 +378,7 @@ private:
 
     int width_;
     int height_;
+    int device_id_ = 0;
     device::SceneParams params_{};
 
     float kernel_ms_ = 0.0f;

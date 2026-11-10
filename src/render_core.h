@@ -35,6 +35,7 @@ struct Hit {
     float3 normal;
     Material material;
     float t;
+    int object;  // OBJECT_SPHERE + i, OBJECT_FLOOR or OBJECT_INSTANCE + i
 };
 
 // Analytic ray-sphere test. t is the distance along dir, which is normalized.
@@ -97,7 +98,9 @@ NG_FN bool scene_intersect(const SceneParams &s, const float3 &origin, const flo
         mesh_surface(s.mesh, best_instance, best_triangle, best_u, best_v, dir, hit.normal, tint);
         hit.material = s.mesh.instances[best_instance].material;
         hit.material.diffuse_color = hit.material.diffuse_color * tint;
+        hit.object = OBJECT_INSTANCE + best_instance;
     } else if (hit_floor) {
+        hit.object = OBJECT_FLOOR;
         hit.normal = make_float3(0.0f, 1.0f, 0.0f);
         hit.material = s.floor.material;
         const int cx = static_cast<int>(floorf(hit.point.x * s.floor.checker_scale));
@@ -107,6 +110,7 @@ NG_FN bool scene_intersect(const SceneParams &s, const float3 &origin, const flo
     } else {
         hit.normal = normalize(hit.point - s.spheres[best_sphere].center);
         hit.material = s.spheres[best_sphere].material;
+        hit.object = OBJECT_SPHERE + best_sphere;
     }
     return true;
 }
@@ -209,6 +213,54 @@ NG_FN void render_pixel(const SceneParams &s, float4 *accum, uint32_t *out, cons
     // just flatten contrast; reinstate one if the lighting starts to clip.
     const float3 average = xyz(acc) * (1.0f / acc.w);
     out[idx] = pack_argb8888(linear_to_srgb(average));
+}
+
+// The images a frame can carry besides the picture. A null pointer is an image not wanted.
+struct AovBuffers {
+    float *depth;
+    float *normal;
+    int32_t *object_id;
+};
+
+// Depth, normal and object ID for one pixel: a single ray through its middle, with no jitter and no
+// shading, so every value is exact and nothing is averaged across an object's edge.
+// Depth is measured along the camera's view axis, as a depth camera reports it, not along the ray.
+NG_FN void aov_pixel(const SceneParams &s, const AovBuffers &out, const int x, const int y, const int width,
+    const int height, const Camera &cam) {
+    const int idx = y * width + x;
+    const float3 dir = camera_ray(cam, static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f, width, height);
+    Hit hit;
+    const bool found = scene_intersect(s, cam.position, dir, hit);
+    if (out.depth) out.depth[idx] = found ? hit.t * dot(dir, cam.forward) : ng_infinity();
+    if (out.normal) {
+        const float3 n = found ? hit.normal : make_float3(0.0f, 0.0f, 0.0f);
+        out.normal[3 * idx] = n.x;
+        out.normal[3 * idx + 1] = n.y;
+        out.normal[3 * idx + 2] = n.z;
+    }
+    if (out.object_id) out.object_id[idx] = found ? hit.object : OBJECT_NONE;
+}
+
+// One ray of a ray query. Distance is along the (normalized) direction. A ray with a zero or
+// non-finite direction, or whose first hit is beyond max_distance, reports a miss.
+NG_FN void cast_ray(const SceneParams &s, const float *origins, const float *directions, const float max_distance,
+    const int i, float *distance, float *normal, int32_t *object_id) {
+    const float3 o = make_float3(origins[3 * i], origins[3 * i + 1], origins[3 * i + 2]);
+    float3 d = make_float3(directions[3 * i], directions[3 * i + 1], directions[3 * i + 2]);
+    const float len2 = dot(d, d);
+    Hit hit;
+    // len2 is compared with >, so a NaN direction is a miss too (the host rejects NaN origins).
+    bool found = len2 > 1e-30f && len2 < 1e30f;
+    if (found) {
+        d = d * (1.0f / sqrtf(len2));
+        found = scene_intersect(s, o, d, hit) && hit.t <= max_distance;
+    }
+    distance[i] = found ? hit.t : ng_infinity();
+    const float3 n = found ? hit.normal : make_float3(0.0f, 0.0f, 0.0f);
+    normal[3 * i] = n.x;
+    normal[3 * i + 1] = n.y;
+    normal[3 * i + 2] = n.z;
+    object_id[i] = found ? hit.object : OBJECT_NONE;
 }
 
 }  // namespace

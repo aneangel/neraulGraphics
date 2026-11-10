@@ -182,6 +182,70 @@ void Renderer::set_ambient(const float ambient) {
 
 float Renderer::ambient() const { return state().backend->ambient(); }
 
+Frame Renderer::render_frame(const Camera &camera, const int frame, const int samples_per_frame,
+    const unsigned outputs) {
+    Impl &r = state();
+    check_render_args(camera, frame, samples_per_frame);
+    constexpr unsigned ALL = OUTPUT_RGB | OUTPUT_DEPTH | OUTPUT_NORMAL | OUTPUT_OBJECT_ID;
+    require(outputs != 0, "render_frame needs at least one output");
+    require((outputs & ~ALL) == 0, "unknown output bits in " + std::to_string(outputs));
+    return r.backend->render_frame(camera, frame, samples_per_frame, outputs);
+}
+
+HostFrame Renderer::render_frame_host(const Camera &camera, const int frame, const int samples_per_frame,
+    const unsigned outputs) {
+    const Frame f = render_frame(camera, frame, samples_per_frame, outputs);
+    const detail::Backend &b = *state().backend;
+    const size_t pixels = static_cast<size_t>(f.width) * f.height;
+    HostFrame out;
+    out.width = f.width;
+    out.height = f.height;
+    if (f.rgb) { out.rgb.resize(pixels * 3); b.copy_to_host(f.rgb, out.rgb.data(), pixels * 3); }
+    if (f.depth) { out.depth.resize(pixels); b.copy_to_host(f.depth, out.depth.data(), pixels * sizeof(float)); }
+    if (f.normal) { out.normal.resize(pixels * 3); b.copy_to_host(f.normal, out.normal.data(), pixels * 3 * sizeof(float)); }
+    if (f.object_id) { out.object_id.resize(pixels); b.copy_to_host(f.object_id, out.object_id.data(), pixels * sizeof(int32_t)); }
+    return out;
+}
+
+RayHits Renderer::cast_rays(const float *origins, const float *directions, const int count, const float max_distance,
+    const Memory input_memory) {
+    Impl &r = state();
+    require(count >= 0, "ray count must be 0 or more, got " + std::to_string(count));
+    require(count <= INT32_MAX / 3, "too many rays: " + std::to_string(count));
+    require(count == 0 || (origins != nullptr && directions != nullptr), "ray origins and directions must not be null");
+    // Not NaN, and more than 0: infinity means no limit.
+    require(max_distance > 0.0f, "max_distance must be positive, got " + std::to_string(max_distance));
+    require(input_memory == Memory::Host || r.backend->device() == Device::Cuda,
+        "device pointers need a CUDA renderer; this one runs on the CPU");
+    if (input_memory == Memory::Host) {
+        // A NaN origin would be traced as if it were a number (the trace is built without NaN checks).
+        for (int i = 0; i < 3 * count; ++i)
+            require(finite(origins[i]), "ray origin " + std::to_string(i / 3) + " has a NaN or infinite value");
+    }
+    return r.backend->cast_rays(origins, directions, count, max_distance, input_memory);
+}
+
+HostRayHits Renderer::cast_rays_host(const std::vector<float> &origins, const std::vector<float> &directions,
+    const float max_distance) {
+    require(origins.size() % 3 == 0 && origins.size() == directions.size(),
+        "origins and directions must each hold 3 floats per ray, and the same number of rays");
+    const int count = static_cast<int>(origins.size() / 3);
+    const RayHits hits = cast_rays(origins.data(), directions.data(), count, max_distance, Memory::Host);
+    const detail::Backend &b = *state().backend;
+    HostRayHits out;
+    out.distance.resize(count);
+    out.normal.resize(static_cast<size_t>(count) * 3);
+    out.object_id.resize(count);
+    if (count > 0) {
+        b.copy_to_host(hits.distance, out.distance.data(), count * sizeof(float));
+        b.copy_to_host(hits.normal, out.normal.data(), static_cast<size_t>(count) * 3 * sizeof(float));
+        b.copy_to_host(hits.object_id, out.object_id.data(), count * sizeof(int32_t));
+    }
+    return out;
+}
+
+Memory Renderer::memory() const { return state().backend->device() == Device::Cuda ? Memory::Device : Memory::Host; }
+
 Device Renderer::device() const { return state().backend->device(); }
 
 float Renderer::last_kernel_ms() const { return state().backend->last_kernel_ms(); }

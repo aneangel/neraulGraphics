@@ -45,6 +45,61 @@ enum class Device {
     Cpu,   // every core of the machine; slower than a GPU, but needs nothing
 };
 
+// Where an array lives: ordinary memory, or an NVIDIA GPU's.
+enum class Memory { Host, Device };
+
+// Which images render_frame() should produce, combined with |. Asking for fewer is faster: a
+// depth-only frame does no shading at all.
+enum Output : unsigned {
+    OUTPUT_RGB = 1,        // the picture: 3 bytes per pixel, red, green, blue
+    OUTPUT_DEPTH = 2,      // distance along the camera's view axis, 1 float per pixel; +infinity where nothing is hit
+    OUTPUT_NORMAL = 4,     // the surface normal in world space facing the camera, 3 floats; 0, 0, 0 where nothing is hit
+    OUTPUT_OBJECT_ID = 8,  // which object: see OBJECT_SPHERE, OBJECT_FLOOR, OBJECT_INSTANCE; OBJECT_NONE where nothing is hit
+};
+
+// The images of one frame, in the renderer's own buffers: valid until the next call that renders.
+// Rows run top to bottom. memory says where the pointers point; on a GPU they are device pointers
+// and the work that wrote them has finished, so any CUDA code (PyTorch, Warp, JAX) can read them.
+// A pointer is null for an image that was not asked for.
+struct Frame {
+    Memory memory;
+    int device_id;  // which GPU, when memory is Device; 0 otherwise
+    int width;
+    int height;
+    const uint8_t *rgb;
+    const float *depth;
+    const float *normal;
+    const int32_t *object_id;
+};
+
+// The same images copied into ordinary vectors, which you own.
+struct HostFrame {
+    int width = 0;
+    int height = 0;
+    std::vector<uint8_t> rgb;
+    std::vector<float> depth;
+    std::vector<float> normal;
+    std::vector<int32_t> object_id;
+};
+
+// What each ray of a ray query found. Arrays have one entry per ray (normal has three), in the
+// renderer's own buffers, valid until the next ray query. A ray that hit nothing has distance
+// +infinity, normal 0, 0, 0 and OBJECT_NONE.
+struct RayHits {
+    Memory memory;
+    int device_id;  // which GPU, when memory is Device; 0 otherwise
+    int count;
+    const float *distance;
+    const float *normal;
+    const int32_t *object_id;
+};
+
+struct HostRayHits {
+    std::vector<float> distance;
+    std::vector<float> normal;
+    std::vector<int32_t> object_id;
+};
+
 // True if this library was built with CUDA and an NVIDIA GPU is present, so Device::Auto
 // would use it. The environment variable NERAULGRAPHICS_DEVICE set to cpu or cuda overrides
 // what Auto chooses (for debugging, or to leave the GPU to something else).
@@ -98,6 +153,35 @@ public:
     // A NaN reaching the running average would blacken that pixel until the next
     // restart, so a camera with any non-finite value is rejected as well.
     const uint32_t *render(const Camera &camera, int frame, int samples_per_frame);
+
+    // Renders the images asked for in `outputs` (see Output). RGB is the picture render() draws,
+    // with the same frame and samples_per_frame meaning; the other images are one ray through the
+    // middle of each pixel, exact and never averaged, so an object's edge is not blurred into a
+    // false depth. The images stay where the renderer keeps them, which on a GPU is the GPU:
+    // nothing is copied, so a policy network can read them directly. See Frame.
+    //
+    // Throws std::invalid_argument for no outputs, an unknown output, or arguments render() rejects.
+    Frame render_frame(const Camera &camera, int frame, int samples_per_frame, unsigned outputs);
+
+    // The same, copied into vectors.
+    HostFrame render_frame_host(const Camera &camera, int frame, int samples_per_frame, unsigned outputs);
+
+    // Casts rays into the scene and reports what each hits first: a LiDAR, a depth sensor, or a
+    // visibility query. origins and directions hold 3 floats per ray, and live where
+    // `input_memory` says. Directions need not be unit length (a zero or non-finite one is a miss).
+    // A hit farther than max_distance counts as a miss. The results are in the renderer's own memory.
+    //
+    // Device pointers need a CUDA renderer. Throws std::invalid_argument for a negative count, a
+    // null pointer, a max_distance that is not positive, or (for host inputs) a non-finite origin.
+    RayHits cast_rays(const float *origins, const float *directions, int count, float max_distance,
+        Memory input_memory = Memory::Host);
+
+    // The same from vectors of 3 floats per ray, with the results copied back into vectors.
+    HostRayHits cast_rays_host(const std::vector<float> &origins, const std::vector<float> &directions,
+        float max_distance);
+
+    // Where this renderer keeps its images: Device for CUDA, Host for the CPU.
+    Memory memory() const;
 
     // Light that reaches every surface regardless of the lights, as a fraction of its diffuse
     // colour: a stand-in for light bounced from the rest of the scene, which this renderer does

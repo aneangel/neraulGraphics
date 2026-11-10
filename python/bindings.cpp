@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -164,6 +165,73 @@ void set_instance_transform_list(PyRenderer &self, const std::vector<Transform> 
 
 using Image = nb::ndarray<nb::numpy, uint8_t, nb::shape<-1, -1, 3>, nb::c_contig>;
 
+// An array owned by the caller from here on: a vector's data, freed when the array is.
+template <class T>
+nb::object own(std::vector<T> &&values, std::initializer_list<size_t> shape) {
+    auto *keep = new std::vector<T>(std::move(values));
+    nb::capsule owner(keep, [](void *p) noexcept { delete static_cast<std::vector<T> *>(p); });
+    return nb::cast(nb::ndarray<nb::numpy, T>(keep->data(), shape.size(), shape.begin(), owner));
+}
+
+// A view of the renderer's own buffer, kept alive by holding the renderer: a NumPy array for the CPU, and for a
+// GPU an object that speaks DLPack (torch.from_dlpack, jax.dlpack.from_dlpack, wp.from_dlpack, cupy.from_dlpack).
+// It is overwritten by the next render or ray query, so the caller must use or copy it first.
+template <class T>
+nb::object view(nb::handle owner, const T *data, std::initializer_list<size_t> shape, const Memory memory, const int device_id) {
+    T *mutable_data = const_cast<T *>(data);
+    if (memory == Memory::Device)
+        return nb::cast(nb::ndarray<T, nb::device::cuda>(mutable_data, shape.size(), shape.begin(), owner, nullptr,
+            nb::dtype<T>(), nb::device::cuda::value, device_id));
+    return nb::cast(nb::ndarray<nb::numpy, T>(mutable_data, shape.size(), shape.begin(), owner));
+}
+
+// render_frame: which images to make, as keyword arguments, and where the result lives.
+nb::dict render_frame(nb::handle self_object, PyRenderer &self, const Camera &camera, const int frame,
+    const int samples_per_frame, const bool rgb, const bool depth, const bool normals, const bool object_ids,
+    const bool zero_copy) {
+    const unsigned outputs = (rgb ? OUTPUT_RGB : 0u) | (depth ? OUTPUT_DEPTH : 0u) | (normals ? OUTPUT_NORMAL : 0u) |
+        (object_ids ? OUTPUT_OBJECT_ID : 0u);
+    nb::dict result;
+    if (!zero_copy) {
+        HostFrame f;
+        {
+            nb::gil_scoped_release release;
+            std::lock_guard<std::mutex> lock(self.mutex);
+            f = self.renderer.render_frame_host(camera, frame, samples_per_frame, outputs);
+        }
+        const size_t h = static_cast<size_t>(f.height), w = static_cast<size_t>(f.width);
+        if (rgb) result["rgb"] = own(std::move(f.rgb), {h, w, 3});
+        if (depth) result["depth"] = own(std::move(f.depth), {h, w});
+        if (normals) result["normals"] = own(std::move(f.normal), {h, w, 3});
+        if (object_ids) result["object_ids"] = own(std::move(f.object_id), {h, w});
+        return result;
+    }
+    Frame f;
+    {
+        nb::gil_scoped_release release;
+        std::lock_guard<std::mutex> lock(self.mutex);
+        f = self.renderer.render_frame(camera, frame, samples_per_frame, outputs);
+    }
+    const size_t h = static_cast<size_t>(f.height), w = static_cast<size_t>(f.width);
+    if (rgb) result["rgb"] = view(self_object, f.rgb, {h, w, 3}, f.memory, f.device_id);
+    if (depth) result["depth"] = view(self_object, f.depth, {h, w}, f.memory, f.device_id);
+    if (normals) result["normals"] = view(self_object, f.normal, {h, w, 3}, f.memory, f.device_id);
+    if (object_ids) result["object_ids"] = view(self_object, f.object_id, {h, w}, f.memory, f.device_id);
+    return result;
+}
+
+using Rays = nb::ndarray<const float, nb::shape<-1, 3>, nb::c_contig, nb::device::cpu>;
+using DeviceRays = nb::ndarray<const float, nb::shape<-1, 3>, nb::c_contig, nb::device::cuda>;
+
+nb::dict rays_to_dict(nb::handle self_object, const RayHits &h) {
+    nb::dict result;
+    const size_t n = static_cast<size_t>(h.count);
+    result["distance"] = view(self_object, h.distance, {n}, h.memory, h.device_id);
+    result["normal"] = view(self_object, h.normal, {n, 3}, h.memory, h.device_id);
+    result["object_id"] = view(self_object, h.object_id, {n}, h.memory, h.device_id);
+    return result;
+}
+
 // A copy, not a view of the renderer's buffer: the next render() overwrites that,
 // which would silently change an image the caller still holds.
 Image render(PyRenderer &self, const Camera &camera, const int frame, const int samples_per_frame) {
@@ -211,6 +279,11 @@ NB_MODULE(_core, m) {
     m.attr("__version__") = NERAULGRAPHICS_VERSION;
     m.attr("MAX_SPHERES") = MAX_SPHERES;
     m.attr("MAX_LIGHTS") = MAX_LIGHTS;
+    // What an object-ID image or a ray query reports.
+    m.attr("OBJECT_NONE") = OBJECT_NONE;
+    m.attr("OBJECT_SPHERE") = OBJECT_SPHERE;
+    m.attr("OBJECT_FLOOR") = OBJECT_FLOOR;
+    m.attr("OBJECT_INSTANCE") = OBJECT_INSTANCE;
 
     nb::exception<CudaError>(m, "CudaError", PyExc_RuntimeError);
 
@@ -433,6 +506,68 @@ NB_MODULE(_core, m) {
             "Light that reaches every surface regardless of the lights, as a fraction of its "
             "diffuse colour. 0 (the default) leaves surfaces facing away from every light black; "
             "0.1 to 0.3 keeps detail visible there. Render with frame=0 after changing it.")
+        .def("render_frame",
+            [](PyRenderer &self, const Camera &camera, const int frame, const int spp, const bool rgb,
+                const bool depth, const bool normals, const bool object_ids, const bool zero_copy) {
+                return render_frame(nb::find(&self), self, camera, frame, spp, rgb, depth, normals, object_ids, zero_copy);
+            },
+            "camera"_a, "frame"_a = 0, "samples_per_frame"_a = 1, nb::kw_only(), "rgb"_a = true, "depth"_a = false,
+            "normals"_a = false, "object_ids"_a = false, "zero_copy"_a = false,
+            "Render the images you ask for and return them as a dict: 'rgb' (H, W, 3) uint8, 'depth' "
+            "(H, W) float32, 'normals' (H, W, 3) float32 and 'object_ids' (H, W) int32.\n\n"
+            "depth is measured along the camera's view axis, as a depth camera reports it, and is "
+            "+inf where nothing is hit. normals are world-space, facing the camera, and 0 where nothing is hit. "
+            "object_ids say what was hit (OBJECT_NONE, OBJECT_SPHERE + i, OBJECT_FLOOR, OBJECT_INSTANCE + i). "
+            "Depth, normals and ids are one exact ray through each pixel's middle, so object edges are not "
+            "blurred into false depths; rgb is the picture render() draws. Asking for fewer images is faster: "
+            "depth alone does no shading.\n\n"
+            "By default the arrays are copies. With zero_copy=True they are views of the renderer's own "
+            "buffers instead, with no copy at all: on a GPU renderer they are CUDA arrays you can hand to "
+            "torch.from_dlpack, jax.dlpack.from_dlpack, warp.from_dlpack or cupy.from_dlpack, already "
+            "finished and ready to read. They are overwritten by the next render, so use or clone them first.")
+        .def("cast_rays",
+            [](PyRenderer &self, const Rays &origins, const Rays &directions, const float max_distance) {
+                if (origins.shape(0) != directions.shape(0))
+                    throw std::invalid_argument("origins and directions must have the same number of rays");
+                const int n = static_cast<int>(origins.shape(0));
+                // Copied into vectors first, so the GIL can be released while the GPU works.
+                std::vector<float> o(origins.data(), origins.data() + 3 * origins.shape(0));
+                std::vector<float> d(directions.data(), directions.data() + 3 * directions.shape(0));
+                HostRayHits hits;
+                {
+                    nb::gil_scoped_release release;
+                    std::lock_guard<std::mutex> lock(self.mutex);
+                    hits = self.renderer.cast_rays_host(o, d, max_distance);
+                }
+                const size_t count = static_cast<size_t>(n);
+                nb::dict result;
+                result["distance"] = own(std::move(hits.distance), {count});
+                result["normal"] = own(std::move(hits.normal), {count, 3});
+                result["object_id"] = own(std::move(hits.object_id), {count});
+                return result;
+            },
+            "origins"_a, "directions"_a, "max_distance"_a = std::numeric_limits<float>::infinity(),
+            "Cast rays into the scene: a LiDAR, a depth sensor, or a visibility query. origins and "
+            "directions are (N, 3) float arrays; directions need not be unit length. Returns a dict of "
+            "copies: 'distance' (N,) along the ray (+inf for a miss), 'normal' (N, 3) and 'object_id' (N,) "
+            "(see render_frame). A hit farther than max_distance is a miss.\n\n"
+            "Pass CUDA arrays instead (for example PyTorch tensors) and the rays are traced where they "
+            "are, with no copy: the results come back as CUDA arrays too, valid until the next ray "
+            "query, with the GIL released. That needs a renderer on a GPU.")
+        .def("cast_rays",
+            [](PyRenderer &self, const DeviceRays &origins, const DeviceRays &directions, const float max_distance) {
+                if (origins.shape(0) != directions.shape(0))
+                    throw std::invalid_argument("origins and directions must have the same number of rays");
+                RayHits hits;
+                {
+                    nb::gil_scoped_release release;
+                    std::lock_guard<std::mutex> lock(self.mutex);
+                    hits = self.renderer.cast_rays(origins.data(), directions.data(), static_cast<int>(origins.shape(0)),
+                        max_distance, Memory::Device);
+                }
+                return rays_to_dict(nb::find(&self), hits);
+            },
+            "origins"_a, "directions"_a, "max_distance"_a = std::numeric_limits<float>::infinity())
         .def("render", &render, "camera"_a, "frame"_a = 0, "samples_per_frame"_a = 1,
             "Trace one frame and return it as a (height, width, 3) uint8 RGB array.\n\n"
             "frame 0 starts a fresh image. Rendering again with frame 1, 2, ... while the "

@@ -70,6 +70,12 @@ class SceneRenderer(SimRenderer):
         super().__init__(width, height, scene, up=scene.up, center=scene.center, extent=scene.extent,
                          lights=lights, fov=fov, ambient=ambient, device=device)
 
+    def render_frame(self, camera=None, frame: int = 0, samples_per_frame: int = 1, *, rgb: bool = True,
+                     depth: bool = False, normals: bool = False, object_ids: bool = False, zero_copy: bool = False) -> dict:
+        """The images asked for as a dict: ``rgb``, ``depth``, ``normals``, ``object_ids``. See :meth:`neraulgraphics.Renderer.render_frame`."""
+        return self.renderer.render_frame(self.camera() if camera is None else camera, frame, samples_per_frame, rgb=rgb,
+                                          depth=depth, normals=normals, object_ids=object_ids, zero_copy=zero_copy)
+
     def render(self, camera=None, frame: int = 0, samples_per_frame: int = 1) -> np.ndarray:
         """Draws the model as a ``(height, width, 3)`` uint8 image. Increase ``frame`` to sharpen it."""
         return self.renderer.render(self.camera() if camera is None else camera, frame, samples_per_frame)

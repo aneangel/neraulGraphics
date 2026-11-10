@@ -21,6 +21,19 @@ namespace {
 
 int failures = 0;
 
+// These tests are built with -ffast-math, under which the compiler may assume there are no infinities
+// or NaNs, and fold std::isinf and std::isfinite to constants. Read the float's exponent bits instead.
+bool is_inf(const float v) {
+    uint32_t bits;
+    std::memcpy(&bits, &v, sizeof(bits));
+    return (bits & 0x7fffffffu) == 0x7f800000u;
+}
+bool is_finite_value(const float v) {
+    uint32_t bits;
+    std::memcpy(&bits, &v, sizeof(bits));
+    return (bits & 0x7f800000u) != 0x7f800000u;
+}
+
 void check(const bool ok, const std::string &what) {
     std::printf("  [%s] %s\n", ok ? "pass" : "FAIL", what.c_str());
     if (!ok) ++failures;
@@ -702,6 +715,183 @@ int main() {
         // The CPU renderer alone: the same scene gives the same picture, however the threads share the rows.
         Renderer first = build(Device::Cpu), second = build(Device::Cpu);
         check(frame(first, 0) == frame(second, 0), "the CPU renders deterministically");
+    }
+
+
+    std::puts("depth, normal and object-ID images");
+    {
+        // A sphere, a textured quad (the sizes and places are what the numbers below come from), a floor.
+        const Material mat = make_material({0.7f, 0.5f, 0.3f}, 0.9f, 0.2f, 0.0f, 40.0f);
+        Plane floor{};
+        floor.y = -2;
+        floor.half_extent_x = 50;
+        floor.z_min = -100;
+        floor.z_max = 100;
+        floor.checker_scale = 1;
+        floor.material = mat;
+        const Camera cam = camera_at_origin();
+        auto depth_at = [&](const HostFrame &f, const int x, const int y) { return f.depth[y * W + x]; };
+        auto id_at = [&](const HostFrame &f, const int x, const int y) { return f.object_id[y * W + x]; };
+        auto normal_at = [&](const HostFrame &f, const int x, const int y) {
+            return Vec3{f.normal[3 * (y * W + x)], f.normal[3 * (y * W + x) + 1], f.normal[3 * (y * W + x) + 2]};
+        };
+        const unsigned all = OUTPUT_DEPTH | OUTPUT_NORMAL | OUTPUT_OBJECT_ID;
+
+        // The sphere: 8 away in front of the camera at its nearest point, so the depth there is 8.
+        Renderer sphere_only(W, H, {{{0, 0, -10}, 2, mat}}, {{{0, 0, 2}, 1.0f, 0.0f}});
+        HostFrame f = sphere_only.render_frame_host(cam, 0, 1, all);
+        check(f.width == W && f.height == H && f.depth.size() == static_cast<size_t>(W) * H, "the images are width x height");
+        check(std::fabs(depth_at(f, W / 2, H / 2) - 8.0f) < 0.02f, "depth at a sphere's near point is its distance (8)");
+        const Vec3 n = normal_at(f, W / 2, H / 2);
+        check(std::fabs(n.x) < 0.05f && std::fabs(n.y) < 0.05f && n.z > 0.99f, "the normal there faces the camera");
+        check(id_at(f, W / 2, H / 2) == OBJECT_SPHERE, "the first sphere has ID OBJECT_SPHERE");
+        check(is_inf(depth_at(f, 3, 3)) && depth_at(f, 3, 3) > 0 && id_at(f, 3, 3) == OBJECT_NONE &&
+                normal_at(f, 3, 3).x == 0 && normal_at(f, 3, 3).z == 0,
+            "where nothing is hit: depth +infinity, normal 0, ID OBJECT_NONE");
+
+        // A flat quad 5 away: planar depth is 5 across the whole quad, even towards its edge, where the
+        // ray to it is longer. A depth camera reports the former.
+        Mesh quad = make_quad(3.0f, 1.0f);
+        Renderer wall(W, H, {}, {{{0, 0, 2}, 1.0f, 0.0f}}, Plane{}, {quad}, {{0, identity_transform(), mat}});
+        HostFrame g = wall.render_frame_host(cam, 0, 1, all);
+        check(std::fabs(depth_at(g, W / 2 + 40, H / 2 + 20) - 5.0f) < 1e-3f && std::fabs(depth_at(g, W / 2 - 30, H / 2 - 15) - 5.0f) < 1e-3f,
+            "depth is along the view axis: a flat wall is 5 deep everywhere, not farther at its edges");
+        check(id_at(g, W / 2, H / 2) == OBJECT_INSTANCE, "the first mesh instance has ID OBJECT_INSTANCE");
+        const Vec3 wn = normal_at(g, W / 2 + 40, H / 2 + 20);
+        check(std::fabs(wn.z - 1.0f) < 1e-4f, "a wall's normal faces the camera");
+
+        // The floor, whose depth at a row of pixels follows from the geometry: 2 / (2(y + 0.5)/H - 1).
+        Renderer ground(W, H, {}, {{{0, 0, 2}, 1.0f, 0.0f}}, floor);
+        HostFrame h = ground.render_frame_host(cam, 0, 1, all);
+        const int row = H * 3 / 4;
+        const float expect = 2.0f / (2.0f * (static_cast<float>(row) + 0.5f) / static_cast<float>(H) - 1.0f);
+        check(id_at(h, W / 2, row) == OBJECT_FLOOR && std::fabs(depth_at(h, W / 2, row) - expect) < 0.01f * expect,
+            "the floor has ID OBJECT_FLOOR and the depth the geometry says (" + std::to_string(expect) + ")");
+        check(std::fabs(normal_at(h, W / 2, row).y - 1.0f) < 1e-5f, "the floor's normal is up");
+
+        // The nearest object wins, and each has its own ID.
+        Renderer both(W, H, {{{0, 0, -3}, 1, mat}, {{0, 0, -8}, 2, mat}}, {{{0, 0, 2}, 1.0f, 0.0f}});
+        HostFrame b = both.render_frame_host(cam, 0, 1, all);
+        check(id_at(b, W / 2, H / 2) == OBJECT_SPHERE && std::fabs(depth_at(b, W / 2, H / 2) - 2.0f) < 0.02f,
+            "the nearer of two spheres is the one reported");
+
+        // Only what is asked for is produced.
+        const Frame depth_only = sphere_only.render_frame(cam, 0, 1, OUTPUT_DEPTH);
+        check(depth_only.depth != nullptr && depth_only.rgb == nullptr && depth_only.normal == nullptr && depth_only.object_id == nullptr,
+            "a frame has only the images that were asked for");
+        check(depth_only.memory == sphere_only.memory() && depth_only.width == W && depth_only.height == H, "a frame says where it is and how big");
+        expect_throw<std::invalid_argument>("no outputs", [&] { sphere_only.render_frame(cam, 0, 1, 0); });
+        expect_throw<std::invalid_argument>("an unknown output", [&] { sphere_only.render_frame(cam, 0, 1, 64); });
+
+        // Two features agreeing with each other: the RGB output is the picture render() draws.
+        const uint32_t *argb = sphere_only.render(cam, 0, 1);
+        const HostFrame rgb = sphere_only.render_frame_host(cam, 0, 1, OUTPUT_RGB);
+        bool same = rgb.rgb.size() == static_cast<size_t>(W) * H * 3;
+        for (size_t i = 0; same && i < static_cast<size_t>(W) * H; ++i)
+            same = rgb.rgb[3 * i] == ((argb[i] >> 16) & 0xFF) && rgb.rgb[3 * i + 1] == ((argb[i] >> 8) & 0xFF) && rgb.rgb[3 * i + 2] == (argb[i] & 0xFF);
+        check(same, "the RGB output is the picture render() draws, as red, green, blue bytes");
+    }
+
+    std::puts("ray queries");
+    {
+        const Material mat = make_material({0.7f, 0.5f, 0.3f}, 0.9f, 0.2f, 0.0f, 40.0f);
+        Renderer r(W, H, {{{0, 0, -10}, 2, mat}}, {{{0, 0, 2}, 1.0f, 0.0f}}, Plane{}, {make_quad(3.0f, 1.0f)},
+            {{0, make_transform({10, 0, -4}), mat}});
+        auto cast = [&](const std::vector<float> &o, const std::vector<float> &d, const float max = INFINITY) {
+            return r.cast_rays_host(o, d, max);
+        };
+        // Straight at the sphere: its front is 8 away, whatever the length of the direction.
+        HostRayHits hit = cast({0, 0, 0, 0, 0, 0}, {0, 0, -1, 0, 0, -40});
+        check(std::fabs(hit.distance[0] - 8.0f) < 1e-3f && std::fabs(hit.distance[1] - 8.0f) < 1e-3f,
+            "a ray hits at its distance along the direction, however long the direction is");
+        check(hit.object_id[0] == OBJECT_SPHERE && std::fabs(hit.normal[2] - 1.0f) < 1e-3f, "and reports the object and its normal");
+
+        hit = cast({0, 0, 0}, {0, 0, -1}, 7.9f);
+        check(is_inf(hit.distance[0]) && hit.object_id[0] == OBJECT_NONE, "a hit beyond max_distance is a miss");
+        hit = cast({0, 0, 0}, {0, 0, -1}, 8.1f);
+        check(hit.object_id[0] == OBJECT_SPHERE, "and a hit within it is not");
+
+        hit = cast({0, 0, 0, 0, 0, 0, 0, 0, 0}, {0, 1, 0, 0, 0, 0, 1, 0, 0});
+        check(is_inf(hit.distance[0]) && is_inf(hit.distance[1]) && hit.object_id[1] == OBJECT_NONE,
+            "a ray into empty space, and one with a zero direction, are misses");
+
+        // The quad is modelled at z = -5 and the instance moves it by (10, 0, -4), so it is at z = -9 around x = 10.
+        hit = cast({10, 0, 0}, {0, 0, -1});
+        check(hit.object_id[0] == OBJECT_INSTANCE && std::fabs(hit.distance[0] - 9.0f) < 1e-3f, "mesh instances are hit, with their own IDs");
+
+        // A ray query and a depth image are the same question: the ray through a pixel, and that pixel's depth.
+        const Camera cam = camera_at_origin();
+        const HostFrame depth = r.render_frame_host(cam, 0, 1, OUTPUT_DEPTH);
+        const int px = W / 2 + 7, py = H / 2 - 5;
+        const float sx = (2.0f * (static_cast<float>(px) + 0.5f) / static_cast<float>(W) - 1.0f) * cam.fov_scale * cam.aspect;
+        const float sy = -(2.0f * (static_cast<float>(py) + 0.5f) / static_cast<float>(H) - 1.0f) * cam.fov_scale;
+        const Vec3 d = {cam.right.x * sx + cam.up.x * sy + cam.forward.x, cam.right.y * sx + cam.up.y * sy + cam.forward.y,
+            cam.right.z * sx + cam.up.z * sy + cam.forward.z};
+        hit = cast({0, 0, 0}, {d.x, d.y, d.z});
+        const float len = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+        const float along_axis = hit.distance[0] * (d.x * cam.forward.x + d.y * cam.forward.y + d.z * cam.forward.z) / len;
+        check(is_finite_value(hit.distance[0]) && std::fabs(along_axis - depth.depth[py * W + px]) < 1e-3f,
+            "the depth image is the ray query's distance, measured along the view axis");
+
+        expect_throw<std::invalid_argument>("negative count", [&] { r.cast_rays(nullptr, nullptr, -1, 10.0f); });
+        expect_throw<std::invalid_argument>("null pointers", [&] { r.cast_rays(nullptr, nullptr, 2, 10.0f); });
+        expect_throw<std::invalid_argument>("max_distance 0", [&] { const float z[3] = {0, 0, 0}; r.cast_rays(z, z, 1, 0.0f); });
+        expect_throw<std::invalid_argument>("NaN max_distance", [&] { const float z[3] = {0, 0, 0}; r.cast_rays(z, z, 1, nan); });
+        expect_throw<std::invalid_argument>("NaN origin", [&] { const float o[3] = {nan, 0, 0}, dd[3] = {0, 0, -1}; r.cast_rays(o, dd, 1, 10.0f); });
+        check(r.cast_rays_host({}, {}, 10.0f).distance.empty(), "no rays is fine");
+        if (r.memory() == Memory::Host)
+            expect_throw<std::invalid_argument>("device pointers on a CPU renderer", [&] { const float z[3] = {0, 0, 1}; r.cast_rays(z, z, 1, 10.0f, Memory::Device); });
+    }
+
+    std::puts("the CPU and GPU agree on these images");
+    {
+        const Material mat = make_material({0.7f, 0.5f, 0.3f}, 0.9f, 0.2f, 0.0f, 40.0f);
+        Mesh smooth = make_icosphere(1.0f, 3);
+        for (const Vec3 &v : smooth.vertices) smooth.normals.push_back(v);
+        auto build = [&](const Device d) {
+            return Renderer(W, H, s.spheres, s.lights, s.floor, {smooth, make_quad(1.5f, 1.0f)},
+                {{0, make_transform({4, 0.5f, -12}, {0.1f, 0.3f, 0, 1}, 2.0f), mat}, {1, make_transform({-4, 0, 0}), mat}}, {}, d);
+        };
+        bool have_gpu = true;
+        try { Renderer probe(8, 8, {}, {}, Plane{}, {}, {}, {}, Device::Cuda); } catch (const CudaError &) { have_gpu = false; }
+        if (have_gpu) {
+            Renderer gpu = build(Device::Cuda), cpu = build(Device::Cpu);
+            const unsigned all = OUTPUT_RGB | OUTPUT_DEPTH | OUTPUT_NORMAL | OUTPUT_OBJECT_ID;
+            const HostFrame a = gpu.render_frame_host(camera(), 0, 1, all), b = cpu.render_frame_host(camera(), 0, 1, all);
+            size_t id_mismatch = 0;
+            double depth_err = 0, normal_err = 0;
+            size_t both_hit = 0;
+            for (size_t i = 0; i < a.object_id.size(); ++i) {
+                if (a.object_id[i] != b.object_id[i]) ++id_mismatch;
+                if (is_finite_value(a.depth[i]) && is_finite_value(b.depth[i])) {
+                    ++both_hit;
+                    depth_err = std::max(depth_err, static_cast<double>(std::fabs(a.depth[i] - b.depth[i])));
+                    for (int k = 0; k < 3; ++k) normal_err = std::max(normal_err, static_cast<double>(std::fabs(a.normal[3 * i + k] - b.normal[3 * i + k])));
+                }
+            }
+            std::printf("  GPU vs CPU: %zu of %zu pixels differ in ID, worst depth difference %.5f, worst normal difference %.5f\n",
+                id_mismatch, a.object_id.size(), depth_err, normal_err);
+            check(id_mismatch <= a.object_id.size() / 2000 && depth_err < 0.01 && normal_err < 0.01 && both_hit > 1000,
+                "depth, normals and object IDs are the same on the CPU and the GPU (to within a few edge pixels)");
+
+            // The same rays, both devices.
+            std::vector<float> origins, dirs;
+            Lcg rng;
+            for (int i = 0; i < 4000; ++i) {
+                origins.insert(origins.end(), {rng.next() * 4 - 2, rng.next() * 4 - 2, rng.next() * 2});
+                dirs.insert(dirs.end(), {rng.next() * 2 - 1, rng.next() * 2 - 1, -rng.next() - 0.1f});
+            }
+            const HostRayHits ra = gpu.cast_rays_host(origins, dirs, 100.0f), rb = cpu.cast_rays_host(origins, dirs, 100.0f);
+            size_t mismatches = 0, hits = 0;
+            for (size_t i = 0; i < ra.object_id.size(); ++i) {
+                if (ra.object_id[i] != rb.object_id[i]) ++mismatches;
+                if (ra.object_id[i] != OBJECT_NONE) ++hits;
+            }
+            std::printf("  4000 random rays: %zu hit something, %zu disagree\n", hits, mismatches);
+            check(hits > 100 && mismatches <= 8, "ray queries give the same answers on the CPU and the GPU");
+        } else {
+            std::puts("  (no CUDA device: skipping the comparison with the GPU)");
+        }
     }
 
     std::puts("ambient light");

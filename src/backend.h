@@ -36,6 +36,18 @@ public:
     // Arguments are already validated.
     virtual const uint32_t *render(const Camera &camera, int frame, int samples_per_frame) = 0;
 
+    // The images asked for in outputs (an Output mask), left in the backend's own memory. Arguments
+    // are already validated. The work has finished when this returns, so the images can be read at once.
+    virtual Frame render_frame(const Camera &camera, int frame, int samples_per_frame, unsigned outputs) = 0;
+
+    // Rays are already validated. Origins and directions are 3 floats per ray in input_memory.
+    // Results are in the backend's own memory, valid until the next ray query.
+    virtual RayHits cast_rays(const float *origins, const float *directions, int count, float max_distance,
+        Memory input_memory) = 0;
+
+    // Copies bytes from one of the backend's own arrays into ordinary memory.
+    virtual void copy_to_host(const void *src, void *dst, size_t bytes) const = 0;
+
     // Transforms are one per instance and already checked.
     virtual void set_instance_transforms(const std::vector<Transform> &transforms) = 0;
 

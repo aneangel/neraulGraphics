@@ -129,3 +129,19 @@ class SimRenderer:
         if len(matrices):
             self.renderer.set_instance_transforms(matrices)
         return self.renderer.render(self.camera() if camera is None else camera, frame, samples_per_frame)
+
+    def _render_frame(self, matrices: np.ndarray, camera: Camera | None, frame: int, samples_per_frame: int,
+                      outputs: dict) -> dict:
+        if len(matrices):
+            self.renderer.set_instance_transforms(matrices)
+        return self.renderer.render_frame(self.camera() if camera is None else camera, frame, samples_per_frame,
+                                          **outputs)
+
+    def cast_rays(self, origins, directions, max_distance: float = float("inf")) -> dict:
+        """Casts rays into the scene as it was last placed (by ``render``, ``render_frame`` or ``update``).
+
+        origins and directions are ``(N, 3)`` float arrays, as NumPy or, on a GPU renderer, as CUDA arrays
+        such as PyTorch tensors. Returns ``distance``, ``normal`` and ``object_id``: see
+        :meth:`neraulgraphics.Renderer.cast_rays`.
+        """
+        return self.renderer.cast_rays(origins, directions, max_distance)

@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <thread>
 #include <vector>
@@ -77,13 +78,32 @@ float4 sample_texture(const TextureHandle texture, const float u, const float v)
 namespace neraulgraphics::detail {
 namespace {
 
-int thread_count(const int rows) {
+int thread_count(const int work_items) {
     int n = static_cast<int>(std::thread::hardware_concurrency());
     if (const char *env = std::getenv("NERAULGRAPHICS_THREADS")) {
         const int requested = std::atoi(env);
         if (requested > 0) n = requested;
     }
-    return std::max(1, std::min(n, rows));
+    return std::max(1, std::min(n, work_items));
+}
+
+// Runs fn(begin, end) over [0, total) in chunks, spread across the threads. Chunks are handed out as
+// threads finish, so a core that is done early takes more. The calling thread works too.
+template <class Fn>
+void parallel_chunks(const int total, const int chunk, Fn &&fn) {
+    std::atomic<int> next{0};
+    auto work = [&] {
+        for (;;) {
+            const int begin = next.fetch_add(chunk);
+            if (begin >= total) return;
+            fn(begin, std::min(begin + chunk, total));
+        }
+    };
+    const int threads = thread_count((total + chunk - 1) / chunk);
+    std::vector<std::thread> pool;
+    for (int i = 1; i < threads; ++i) pool.emplace_back(work);
+    work();
+    for (std::thread &t : pool) t.join();
 }
 
 class CpuBackend final : public Backend {
@@ -124,30 +144,56 @@ public:
 
     const uint32_t *render(const Camera &camera, const int frame, const int samples_per_frame) override {
         const auto start = std::chrono::steady_clock::now();
-        const host::Camera cam = host::to_device(camera);
-
-        // Rows are handed out a few at a time, so cores that finish early take more.
-        std::atomic<int> next_row{0};
-        constexpr int CHUNK = 4;
-        auto work = [&] {
-            for (;;) {
-                const int y0 = next_row.fetch_add(CHUNK);
-                if (y0 >= height_) return;
-                for (int y = y0; y < std::min(y0 + CHUNK, height_); ++y)
-                    for (int x = 0; x < width_; ++x)
-                        host::render_pixel(params_, accum_.data(), pixels_.data(), x, y, width_, height_, cam, frame,
-                            samples_per_frame);
-            }
-        };
-        const int threads = thread_count(height_);
-        std::vector<std::thread> pool;
-        for (int i = 1; i < threads; ++i) pool.emplace_back(work);
-        work();  // this thread works too
-        for (std::thread &t : pool) t.join();
-
+        draw(camera, frame, samples_per_frame);
         ms_ = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
         return pixels_.data();
     }
+
+    Frame render_frame(const Camera &camera, const int frame, const int samples_per_frame,
+        const unsigned outputs) override {
+        const auto start = std::chrono::steady_clock::now();
+        const size_t pixels = static_cast<size_t>(width_) * height_;
+        Frame f{Memory::Host, 0, width_, height_, nullptr, nullptr, nullptr, nullptr};
+
+        if (outputs & OUTPUT_RGB) {
+            draw(camera, frame, samples_per_frame);
+            rgb_.resize(pixels * 3);
+            for (size_t i = 0; i < pixels; ++i) {
+                rgb_[3 * i] = static_cast<uint8_t>(pixels_[i] >> 16);
+                rgb_[3 * i + 1] = static_cast<uint8_t>(pixels_[i] >> 8);
+                rgb_[3 * i + 2] = static_cast<uint8_t>(pixels_[i]);
+            }
+            f.rgb = rgb_.data();
+        }
+        host::AovBuffers aov{nullptr, nullptr, nullptr};
+        if (outputs & OUTPUT_DEPTH) { depth_.resize(pixels); aov.depth = depth_.data(); f.depth = depth_.data(); }
+        if (outputs & OUTPUT_NORMAL) { normal_.resize(pixels * 3); aov.normal = normal_.data(); f.normal = normal_.data(); }
+        if (outputs & OUTPUT_OBJECT_ID) { id_.resize(pixels); aov.object_id = id_.data(); f.object_id = id_.data(); }
+        if (aov.depth || aov.normal || aov.object_id) {
+            const host::Camera cam = host::to_device(camera);
+            parallel_chunks(height_, 4, [&](const int y0, const int y1) {
+                for (int y = y0; y < y1; ++y)
+                    for (int x = 0; x < width_; ++x) host::aov_pixel(params_, aov, x, y, width_, height_, cam);
+            });
+        }
+        ms_ = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
+        return f;
+    }
+
+    RayHits cast_rays(const float *origins, const float *directions, const int count, const float max_distance,
+        const Memory) override {
+        ray_distance_.resize(count);
+        ray_normal_.resize(static_cast<size_t>(count) * 3);
+        ray_id_.resize(count);
+        parallel_chunks(count, 256, [&](const int begin, const int end) {
+            for (int i = begin; i < end; ++i)
+                host::cast_ray(params_, origins, directions, max_distance, i, ray_distance_.data(), ray_normal_.data(),
+                    ray_id_.data());
+        });
+        return RayHits{Memory::Host, 0, count, ray_distance_.data(), ray_normal_.data(), ray_id_.data()};
+    }
+
+    void copy_to_host(const void *src, void *dst, const size_t bytes) const override { std::memcpy(dst, src, bytes); }
 
     void set_instance_transforms(const std::vector<Transform> &transforms) override {
         refresh_instances(instances_->update(transforms));
@@ -159,6 +205,17 @@ public:
     Device device() const override { return Device::Cpu; }
 
 private:
+    // The picture, into pixels_ (0xAARRGGBB).
+    void draw(const Camera &camera, const int frame, const int samples_per_frame) {
+        const host::Camera cam = host::to_device(camera);
+        parallel_chunks(height_, 4, [&](const int y0, const int y1) {
+            for (int y = y0; y < y1; ++y)
+                for (int x = 0; x < width_; ++x)
+                    host::render_pixel(params_, accum_.data(), pixels_.data(), x, y, width_, height_, cam, frame,
+                        samples_per_frame);
+        });
+    }
+
     static std::vector<host::float4> to_float4(const std::vector<float> &flat) {
         std::vector<host::float4> out(flat.size() / 4);
         for (size_t i = 0; i < out.size(); ++i) out[i] = host::float4{flat[4 * i], flat[4 * i + 1], flat[4 * i + 2], flat[4 * i + 3]};
@@ -187,6 +244,15 @@ private:
     std::vector<host::float4> accum_;
     std::vector<uint32_t> pixels_;
     float ms_ = 0.0f;
+
+    // The images render_frame() hands out, and the results of the last ray query. Allocated when first asked for.
+    std::vector<uint8_t> rgb_;
+    std::vector<float> depth_;
+    std::vector<float> normal_;
+    std::vector<int32_t> id_;
+    std::vector<float> ray_distance_;
+    std::vector<float> ray_normal_;
+    std::vector<int32_t> ray_id_;
 
     std::unique_ptr<InstanceSet> instances_;
     std::vector<bvh::Node> blas_;

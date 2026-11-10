@@ -169,9 +169,36 @@ class NewtonRenderer(SimRenderer):
         Pass ``frame=0`` for each new state, since the picture built up so far shows the old one.
         If the camera is fixed and the simulation paused, increasing ``frame`` sharpens the image.
         """
-        body_q = None
+        return self._render(self._placed(state), camera, frame, samples_per_frame)
+
+    def _placed(self, state: newton.State | None) -> np.ndarray:
+        """The shapes' world matrices for ``state`` (default: the model's initial pose)."""
         if state is not None and state.body_q is not None and state.body_q.shape[0]:
-            body_q = state.body_q.numpy()
-        else:
-            body_q = self._initial_body_q
-        return self._render(self._matrices(body_q), camera, frame, samples_per_frame)
+            return self._matrices(state.body_q.numpy())
+        return self._matrices(self._initial_body_q)
+
+    def update(self, state: newton.State | None = None) -> None:
+        """Moves the shapes to ``state`` without drawing anything, so :meth:`cast_rays` sees it."""
+        matrices = self._placed(state)
+        if len(matrices):
+            self.renderer.set_instance_transforms(matrices)
+
+    def render_frame(self, state: newton.State | None = None, camera=None, frame: int = 0, samples_per_frame: int = 1, *,
+                     rgb: bool = True, depth: bool = False, normals: bool = False, object_ids: bool = False,
+                     zero_copy: bool = False) -> dict:
+        """Draws ``state`` into the images asked for, as a dict: ``rgb``, ``depth``, ``normals``, ``object_ids``.
+
+        The sensor outputs of a robotics or RL pipeline. depth is along the view axis and ``inf`` where
+        nothing is hit; object_ids number the shapes as :attr:`object_id_of_shape` says. With
+        ``zero_copy=True`` the arrays are views of the renderer's own buffers (CUDA arrays on a GPU, for
+        ``torch.from_dlpack`` and the like), overwritten by the next render. See
+        :meth:`neraulgraphics.Renderer.render_frame`.
+        """
+        return self._render_frame(self._placed(state), camera, frame, samples_per_frame,
+                                  dict(rgb=rgb, depth=depth, normals=normals, object_ids=object_ids, zero_copy=zero_copy))
+
+    @property
+    def object_id_of_shape(self) -> dict[int, int]:
+        """Which object ID each drawn Newton shape index has in an ``object_ids`` image or a ray query."""
+        from ._core import OBJECT_INSTANCE
+        return {int(shape): OBJECT_INSTANCE + i for i, shape in enumerate(self._shapes)}

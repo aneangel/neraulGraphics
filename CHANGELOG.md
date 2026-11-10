@@ -6,6 +6,21 @@ without one, and uses the section as the release notes.
 Versions follow [semantic versioning](https://semver.org). Before 1.0, a minor
 version (0.x.0) may change the API.
 
+## [Unreleased]
+
+### Added
+- Sensor outputs. `Renderer.render_frame(camera, rgb=, depth=, normals=, object_ids=)` returns depth
+  (along the view axis, `inf` where nothing is hit), world-space normals and object-ID images, each
+  one exact ray through the pixel's middle. IDs are fixed numbers: `OBJECT_NONE`, `OBJECT_SPHERE + i`,
+  `OBJECT_FLOOR`, `OBJECT_INSTANCE + i`. Asking for fewer images is faster: depth alone does no shading.
+- `Renderer.cast_rays(origins, directions, max_distance)`: ray queries for LiDAR and range sensors.
+- Zero-copy output. With `zero_copy=True` the images are views of the renderer's buffers, and on a GPU
+  they are CUDA arrays for `torch.from_dlpack`, `jax.dlpack.from_dlpack`, `warp.from_dlpack` or
+  `cupy.from_dlpack`, already finished. `cast_rays` takes CUDA arrays such as PyTorch tensors and
+  answers on the GPU. C++: `render_frame`, `render_frame_host`, `cast_rays`, `cast_rays_host`.
+- `render_frame` and `cast_rays` on the Newton, MuJoCo and loaded-model renderers, `update(state)` to
+  place shapes without drawing, and `object_id_of_shape` / `object_id_of_geom`.
+
 ## [0.4.0]
 
 Newton and MuJoCo adapters, model loading, textures, and a CPU backend so it runs on any machine.

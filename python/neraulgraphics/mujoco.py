@@ -142,6 +142,28 @@ class MuJoCoRenderer(SimRenderer):
         rotation = np.asarray(data.geom_xmat[self._geoms], dtype=np.float64).reshape(-1, 3, 3)
         return matrices_from_rotations(rotation, data.geom_xpos[self._geoms], self._scale)
 
+    def update(self, data: mujoco.MjData) -> None:
+        """Moves the geoms to ``data`` without drawing anything, so :meth:`cast_rays` sees it."""
+        self._place(data)
+
+    def render_frame(self, data: mujoco.MjData, camera=None, frame: int = 0, samples_per_frame: int = 1, *, rgb: bool = True,
+                     depth: bool = False, normals: bool = False, object_ids: bool = False, zero_copy: bool = False) -> dict:
+        """Draws ``data`` into the images asked for, as a dict: ``rgb``, ``depth``, ``normals``, ``object_ids``.
+
+        The sensor outputs of a robotics or RL pipeline. depth is along the view axis and ``inf`` where
+        nothing is hit; :attr:`object_id_of_geom` says which geom each ID is. With ``zero_copy=True`` the
+        arrays are views of the renderer's own buffers (CUDA arrays on a GPU, for ``torch.from_dlpack`` and
+        the like), overwritten by the next render. See :meth:`neraulgraphics.Renderer.render_frame`.
+        """
+        return self._render_frame(self._matrices(data), camera, frame, samples_per_frame,
+                                  dict(rgb=rgb, depth=depth, normals=normals, object_ids=object_ids, zero_copy=zero_copy))
+
+    @property
+    def object_id_of_geom(self) -> dict[int, int]:
+        """Which object ID each drawn MuJoCo geom index has in an ``object_ids`` image or a ray query."""
+        from ._core import OBJECT_INSTANCE
+        return {int(geom): OBJECT_INSTANCE + i for i, geom in enumerate(self._geoms)}
+
     def render(self, data: mujoco.MjData, camera=None, *, frame: int = 0, samples_per_frame: int = 1) -> np.ndarray:
         """Draws ``data`` as a ``(height, width, 3)`` uint8 image.
 

@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 
 #ifdef NG_BACKEND_CPU
 
@@ -42,6 +43,8 @@ inline int ng_float_as_int(const float f) {
     std::memcpy(&i, &f, sizeof(i));
     return i;
 }
+
+inline float ng_infinity() { return std::numeric_limits<float>::infinity(); }
 
 // A texture on the CPU: the bytes as given, decoded and filtered when sampled (see sample_texture).
 struct CpuTexture {
@@ -77,6 +80,9 @@ using TextureHandle = cudaTextureObject_t;
 
 #ifdef __CUDACC__
 __device__ __forceinline__ int ng_float_as_int(const float f) { return __float_as_int(f); }
+
+// Built from its bits, so it survives -use_fast_math, which otherwise assumes there is no infinity.
+__device__ __forceinline__ float ng_infinity() { return __int_as_float(0x7f800000); }
 
 // Hardware filtering and sRGB decode, set up when the texture object is created.
 __device__ __forceinline__ float4 sample_texture(const TextureHandle texture, const float u, const float v) {

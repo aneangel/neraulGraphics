@@ -185,6 +185,33 @@ class TestNewton:
         assert center_pixel(dark.render(None, camera)).max() < 12
         assert center_pixel(lit.render(None, camera)).max() > 40
 
+    def test_sensor_images_name_the_shapes_and_follow_the_state(self, nt, gpu):
+        from neraulgraphics.newton import NewtonRenderer
+        newton, wp = nt
+
+        def add(b, wp):
+            body = b.add_body(xform=wp.transform(p=wp.vec3(0.0, 0.0, 1.0), q=wp.quat_identity()))
+            b.add_shape_sphere(body, radius=0.5)
+            b.add_ground_plane()
+
+        model = self.model_with(nt, add)
+        view = NewtonRenderer(model, W, H, lights=LIGHTS)
+        camera = view.camera((0.0, -5.0, 1.0), (0.0, 0.0, 1.0))
+        sphere_id = view.object_id_of_shape[0]
+        out = view.render_frame(model.state(), camera, rgb=False, depth=True, object_ids=True)
+        assert out["object_ids"][H // 2, W // 2] == sphere_id
+        assert out["depth"][H // 2, W // 2] == pytest.approx(4.5, abs=0.05)  # the sphere's near side
+
+        # Move the body, then ask a ray query without drawing: update() puts the shapes where the state says.
+        state = model.state()
+        moved = state.body_q.numpy()
+        moved[0, 1] = 2.0  # slide along y, away from the camera
+        state.body_q.assign(moved)
+        view.update(state)
+        origin, direction = np.array([[0.0, -5.0, 1.0]], dtype=np.float32), np.array([[0.0, 1.0, 0.0]], dtype=np.float32)
+        hit = view.cast_rays(origin, direction)
+        assert hit["object_id"][0] == sphere_id and hit["distance"][0] == pytest.approx(6.5, abs=1e-3)
+
     def test_up_axis_is_respected(self, nt, gpu):
         from neraulgraphics.newton import NewtonRenderer
         newton, wp = nt
@@ -276,6 +303,20 @@ class TestMuJoCo:
         ground = image[H * 3 // 4:, :]
         assert ground[:, :, 1].max() - ground[:, :, 1].min() > 8  # squares of two shades
         assert ground[:, :, 0].mean() > ground[:, :, 2].mean() + 20  # and the geom's reddish colour
+
+    def test_sensor_images_name_the_geoms(self, mj, gpu):
+        from neraulgraphics.mujoco import MuJoCoRenderer
+        m, d = self.model(mj, '<geom type="plane" size="0 0 0.1"/><geom type="sphere" size="0.5" pos="0 0 1"/>'
+                              '<geom type="box" size="0.3 0.3 0.3" pos="2 0 0.3"/>')
+        view = MuJoCoRenderer(m, W, H, lights=LIGHTS)
+        camera = view.camera((0, -5, 1), (0, 0, 1))
+        out = view.render_frame(d, camera, rgb=False, depth=True, object_ids=True)
+        ids = view.object_id_of_geom
+        assert out["object_ids"][H // 2, W // 2] == ids[1]
+        assert ids[0] in set(out["object_ids"].ravel().tolist())  # the ground
+        assert out["depth"][H // 2, W // 2] == pytest.approx(4.5, abs=0.05)
+        hit = view.cast_rays(np.array([[2.0, -5.0, 0.3]], dtype=np.float32), np.array([[0, 1, 0]], dtype=np.float32))
+        assert hit["object_id"][0] == ids[2] and hit["distance"][0] == pytest.approx(4.7, abs=1e-3)
 
     def test_follows_the_simulation(self, mj, gpu):
         from neraulgraphics.mujoco import MuJoCoRenderer
