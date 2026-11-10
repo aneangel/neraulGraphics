@@ -3,7 +3,7 @@
 The long form: the viewer, editing its scene, how the image sharpens, and benchmarks.
 For install and quick start, see the [README](../README.md).
 
-A real-time raytracer that runs on your GPU, as an interactive viewer or as a
+A real-time raytracer that runs on your GPU (or your CPU), as an interactive viewer or as a
 library you call from Python or C++.
 
 ![Screenshot](screenshot.png)
@@ -27,12 +27,12 @@ CUDA program on the GPU, where thousands of pixels get traced at the same time.
 - **A picture that improves while you sit still** — see [below](#the-image-gets-better-if-you-wait)
 - **Save a screenshot** with `P`
 
-## Requirements (at least what I used for this project)
+## Requirements
 
-- An NVIDIA GPU (RTX 50-series out of the box — see the note below for others)
-- CUDA Toolkit 12 or newer
-- SDL2
-- CMake 3.28+
+- A C++17 compiler, CMake 3.28+, and SDL2 (for the viewer)
+- *Optional:* an NVIDIA GPU and CUDA Toolkit 12 or newer. With them the viewer and library trace
+  on the GPU (RTX 50-series out of the box, see the note below for others); without them they
+  trace on the CPU, which is slower but needs nothing else. See [portability](portability.md).
 
 On Ubuntu or Debian:
 
@@ -218,16 +218,18 @@ now takes longer than drawing it.
 ## Use it from Python
 
 ```bash
-pip install neraulgraphics-0.3.0-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+pip install neraulgraphics-0.4.0-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
 ```
 
 Wheels are on the [releases page](https://github.com/aneangel/neraulGraphics/releases).
-They need only an NVIDIA driver, not the CUDA toolkit, and work on any NVIDIA GPU
-from the RTX 20-series on. Or build from source, which needs the CUDA toolkit and
-compiles for the GPU in the machine you build on:
+The Linux x86_64 ones carry the GPU backend: they need only an NVIDIA driver, not the CUDA
+toolkit, work on any NVIDIA GPU from the RTX 20-series on, and use the CPU if there is no GPU.
+There are CPU-only wheels for macOS, Windows and Linux aarch64. Or build from source, which
+adds the GPU backend if the CUDA toolkit is installed, compiled for the GPU in the machine you
+build on:
 
 ```bash
-pip install git+https://github.com/aneangel/neraulGraphics@v0.3.0
+pip install git+https://github.com/aneangel/neraulGraphics@v0.4.0
 ```
 
 Then:
@@ -273,7 +275,7 @@ cmake --install build --prefix ~/.local
 Then, in your project's `CMakeLists.txt`:
 
 ```cmake
-find_package(neraulgraphics 0.3 REQUIRED)
+find_package(neraulgraphics 0.4 REQUIRED)
 target_link_libraries(my_app PRIVATE neraulgraphics::core)
 ```
 
@@ -284,7 +286,7 @@ installing and pull a release straight from GitHub:
 include(FetchContent)
 FetchContent_Declare(neraulgraphics
     GIT_REPOSITORY https://github.com/aneangel/neraulGraphics.git
-    GIT_TAG v0.3.0)
+    GIT_TAG v0.4.0)
 FetchContent_MakeAvailable(neraulgraphics)
 ```
 
@@ -312,13 +314,16 @@ what, rather than closing your program.
 | `include/neraulgraphics/renderer.h` | The `Renderer` class you call to render a frame |
 | `include/neraulgraphics/scene.h` | The scene building blocks: spheres, lights, materials, camera |
 | `include/neraulgraphics/mesh.h` | Triangle meshes, instances, transforms, and box and sphere generators |
-| `src/render_gpu.cu` | The actual raytracing, running on the GPU |
-| `src/mesh_gpu.cuh` | The two-level ray traversal: instances, then mesh, then triangle |
+| `src/render_core.h` | The renderer itself: shading and the work for one pixel. Compiled as CUDA and as plain C++, so both backends draw the same picture |
+| `src/mesh_dev.h` | The two-level ray traversal: instances, then mesh, then triangle |
+| `src/cuda_backend.cu` | The GPU backend: device memory and the kernel launch |
+| `src/cpu_backend.cpp` | The CPU backend: the same code on every core |
+| `src/renderer.cpp` | The `Renderer` class: checks input and picks a backend |
 | `src/bvh.h`, `src/bvh.cpp` | Builds and refits the BVH on the CPU, with no CUDA involved |
 | `Makefile` | `make raytracer`, `make run`, `make test` |
 | `src/main.cpp` | The viewer: window, keyboard and mouse, camera, scene setup |
 | `python/` | The Python package and its bindings |
-| `tests/` | C++ tests (`ctest`) and Python tests (`pytest`); both need a GPU |
+| `tests/` | C++ tests (`ctest`) and Python tests (`pytest`); they run on whichever device is available, and compare the CPU and GPU when both are |
 | `CHANGELOG.md`, `RELEASING.md` | What changed in each version, and how to publish one |
 
 ## Credits

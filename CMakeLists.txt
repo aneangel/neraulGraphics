@@ -23,7 +23,7 @@ endif()
 
 # The one place the version is written. version.h, the find_package version file,
 # the Python package metadata and neraulgraphics.__version__ all read it from here.
-project(neraulgraphics VERSION 0.3.0 LANGUAGES CXX)
+project(neraulgraphics VERSION 0.4.0 LANGUAGES CXX)
 
 # CUDA is optional. Without it the library still builds and renders, on the CPU, with nothing but a
 # C++17 compiler. AUTO uses CUDA when a CUDA compiler is found; ON requires it; OFF skips it.

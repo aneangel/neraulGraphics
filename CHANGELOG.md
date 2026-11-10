@@ -6,7 +6,9 @@ without one, and uses the section as the release notes.
 Versions follow [semantic versioning](https://semver.org). Before 1.0, a minor
 version (0.x.0) may change the API.
 
-## [Unreleased]
+## [0.4.0]
+
+Newton and MuJoCo adapters, model loading, textures, and a CPU backend so it runs on any machine.
 
 ### Added
 - A CPU backend. The renderer runs on every core of the machine when there is no NVIDIA GPU,

@@ -95,7 +95,7 @@ articulated humanoid renders in under a millisecond a frame. Runnable versions a
 C++:
 
 ```cmake
-find_package(neraulgraphics 0.3 REQUIRED)
+find_package(neraulgraphics 0.4 REQUIRED)
 target_link_libraries(my_app PRIVATE neraulgraphics::core)
 ```
 
