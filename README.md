@@ -45,11 +45,11 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```
 
-**Using a different GPU?** Open `CMakeLists.txt` and change this line to match your
-card, or just set it to `native` to auto-detect:
+**Using a different GPU?** The build targets RTX 50-series (`120`) by default. Pass
+your card's number instead, or `native` to auto-detect:
 
-```cmake
-set(CMAKE_CUDA_ARCHITECTURES 120)   # 120 = RTX 50-series
+```bash
+cmake -S . -B build -DCMAKE_CUDA_ARCHITECTURES=native
 ```
 
 ## Run
@@ -143,15 +143,55 @@ For comparison, an earlier CPU version of this same renderer took about 23 ms at
 Tracing is no longer the slow part, copying the finished image back for display
 now takes longer than drawing it.
 
+## Use it in your own project
+
+The renderer is a library, `raytracer::core`, with no window or SDL attached. Your
+project doesn't need to compile any CUDA itself; a plain C++ project works.
+
+Install it once:
+
+```bash
+cmake -S . -B build
+cmake --build build
+cmake --install build --prefix ~/.local
+```
+
+Then, in your project's `CMakeLists.txt`:
+
+```cmake
+find_package(raytracer 0.1 REQUIRED)
+target_link_libraries(my_app PRIVATE raytracer::core)
+```
+
+Configure with `-DCMAKE_PREFIX_PATH=~/.local` if CMake can't find it. Or skip
+installing and pull the source in directly with `add_subdirectory(path/to/raytracer)`
+or `FetchContent`.
+
+Rendering a frame takes a scene, a camera, and a loop:
+
+```cpp
+#include <raytracer/render_gpu.h>
+
+gpu::Renderer renderer(width, height, spheres, lights, floor);
+const uint32_t *pixels = nullptr;
+for (int frame = 0; frame < 64; ++frame)   // more frames, smoother image
+    pixels = renderer.render(camera, frame, 1);
+// pixels: width*height ARGB values, ready to save or display
+```
+
+If something is wrong with the scene, the renderer throws an exception that says
+what, rather than closing your program.
+
 ## Project layout
 
 | File | What's in it |
 |---|---|
-| `src/main.cpp` | Window, keyboard and mouse, camera, scene setup |
-| `src/scene.h` | The scene building blocks: spheres, lights, materials, camera |
-| `src/geom_gpu.cuh` | Vector maths, random numbers, colour handling |
+| `src/main.cpp` | The viewer: window, keyboard and mouse, camera, scene setup |
 | `src/render_gpu.cu` | The actual raytracing, running on the GPU |
-| `src/render_gpu.h` | The handful of functions `main.cpp` calls to render a frame |
+| `include/raytracer/render_gpu.h` | The `Renderer` class you call to render a frame |
+| `include/raytracer/scene.h` | The scene building blocks: spheres, lights, materials, camera |
+| `include/raytracer/geom_gpu.cuh` | Vector maths, random numbers, colour handling |
+| `cmake/` | What lets other projects find the library with `find_package` |
 
 ## Credits
 

@@ -1,12 +1,12 @@
 #ifndef SCENE_H
 #define SCENE_H
 
-// Scene types shared by host and device. All POD, so they can be copied
-// straight into __constant__ memory with cudaMemcpyToSymbol.
+// Scene types shared by host and device. All POD, so a scene can be passed to the
+// kernel by value, where it lands in the parameter bank of constant memory.
 
 #include "geom_gpu.cuh"
 
-// Constant memory is a fixed bank, so these arrays are sized at compile time.
+// Kernel parameters have a fixed size, so these arrays are sized at compile time.
 constexpr int MAX_SPHERES = 32;
 constexpr int MAX_LIGHTS = 8;
 

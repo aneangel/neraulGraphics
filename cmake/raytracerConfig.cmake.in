@@ -1,0 +1,11 @@
+# Loaded by find_package(raytracer). Provides the imported target raytracer::core.
+
+@PACKAGE_INIT@
+
+# raytracer::core links CUDA::cudart, so that target has to exist first.
+include(CMakeFindDependencyMacro)
+find_dependency(CUDAToolkit)
+
+include("${CMAKE_CURRENT_LIST_DIR}/raytracerTargets.cmake")
+
+check_required_components(raytracer)

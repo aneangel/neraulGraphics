@@ -7,8 +7,8 @@
 #include <string>
 #include <vector>
 #include <SDL2/SDL.h>
-#include "render_gpu.h"
-#include "scene.h"
+#include <raytracer/render_gpu.h>
+#include <raytracer/scene.h>
 
 namespace {
     float3 forward_from_angles(const float yaw, const float pitch) {
@@ -28,7 +28,7 @@ namespace {
     }
 }
 
-int main(int, char **) {
+int run() {
     constexpr int width = 1920;
     constexpr int height = 1080;
     constexpr float fov = M_PI / 2;
@@ -65,6 +65,10 @@ int main(int, char **) {
     floor.checker_scale = 0.5f;
     floor.material = make_material(make_float3(1.0f, 1.0f, 1.0f), 1.0f, 0.0f, 0.0f, 1.0f);
 
+    // Built before the window, so a bad scene is reported without one flashing up.
+    // Frees its device memory when it goes out of scope.
+    gpu::Renderer gpu_renderer(width, height, spheres, lights, floor);
+
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         std::cerr << "SDL_Init: " << SDL_GetError() << "\n";
         return 1;
@@ -77,8 +81,6 @@ int main(int, char **) {
     SDL_Texture *texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888,
         SDL_TEXTUREACCESS_STREAMING, width, height);
     SDL_RenderSetLogicalSize(renderer, width, height);
-
-    gpu::init(width, height, spheres, lights, floor);
 
     float3 position = make_float3(0, 0, 0);
     float yaw = 0, pitch = 0;
@@ -149,7 +151,7 @@ int main(int, char **) {
         const Camera camera = make_camera(position, position + forward_from_angles(yaw, pitch),
             world_up, fov, width, height);
 
-        pixels = gpu::render(camera, frame, samples_per_frame);
+        pixels = gpu_renderer.render(camera, frame, samples_per_frame);
 
         SDL_UpdateTexture(texture, nullptr, pixels, width * sizeof(uint32_t));
         SDL_RenderClear(renderer);
@@ -158,15 +160,24 @@ int main(int, char **) {
 
         char title[160];
         snprintf(title, sizeof(title), "raytracer  %dx%d  %.1f fps  kernel %.2f ms  %d spp  pos %.1f %.1f %.1f",
-            width, height, 1.f / dt, gpu::last_kernel_ms(), (frame + 1) * samples_per_frame,
+            width, height, 1.f / dt, gpu_renderer.last_kernel_ms(), (frame + 1) * samples_per_frame,
             position.x, position.y, position.z);
         SDL_SetWindowTitle(window, title);
     }
 
-    gpu::shutdown();
     SDL_DestroyTexture(texture);
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
     SDL_Quit();
     return 0;
+}
+
+// The renderer reports failures as exceptions; here they become a message and an exit status.
+int main(int, char **) {
+    try {
+        return run();
+    } catch (const std::exception &e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    }
 }

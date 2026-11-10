@@ -10,6 +10,8 @@
 !/.gitignore
 !/CMakeLists.txt
 !/src/**
+!/include/**
+!/cmake/**
 !/README.md
 !/docs/**
 
