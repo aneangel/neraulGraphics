@@ -6,11 +6,14 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <vector>
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
+#include <nanobind/stl/array.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 #include <neraulgraphics/renderer.h>
@@ -70,9 +73,50 @@ struct PyRenderer {
     std::mutex mutex;
 
     PyRenderer(const int width, const int height, const std::vector<Sphere> &spheres,
-        const std::vector<Light> &lights, const Plane &floor)
-        : renderer(width, height, spheres, lights, floor) {}
+        const std::vector<Light> &lights, const Plane &floor, const std::vector<Mesh> &meshes,
+        const std::vector<Instance> &instances)
+        : renderer(width, height, spheres, lights, floor, meshes, instances) {}
 };
+
+// Arrays arrive as C-contiguous float32 or uint32 (anything else is converted),
+// which is what lets the C++ side read them with no per-element Python calls.
+using Vertices = nb::ndarray<const float, nb::shape<-1, 3>, nb::c_contig, nb::device::cpu>;
+using Triangles = nb::ndarray<const uint32_t, nb::shape<-1, 3>, nb::c_contig, nb::device::cpu>;
+using Matrices = nb::ndarray<const float, nb::shape<-1, 3, 4>, nb::c_contig, nb::device::cpu>;
+using Matrix = nb::ndarray<const float, nb::shape<-1, 4>, nb::c_contig, nb::device::cpu>;
+
+Mesh make_mesh(const Vertices &vertices, const Triangles &triangles) {
+    Mesh mesh;
+    mesh.vertices.resize(vertices.shape(0));
+    std::memcpy(mesh.vertices.data(), vertices.data(), vertices.shape(0) * 3 * sizeof(float));
+    mesh.indices.resize(triangles.shape(0) * 3);
+    std::memcpy(mesh.indices.data(), triangles.data(), triangles.shape(0) * 3 * sizeof(uint32_t));
+    return mesh;
+}
+
+// A 3x4 or 4x4 matrix; the bottom row of a 4x4 is ignored.
+Transform transform_from_matrix(const Matrix &m) {
+    if (m.shape(0) != 3 && m.shape(0) != 4)
+        throw std::invalid_argument("transform matrix must be 3x4 or 4x4, got " +
+            std::to_string(m.shape(0)) + "x4");
+    Transform t;
+    std::memcpy(t.m, m.data(), 12 * sizeof(float));
+    return t;
+}
+
+void set_instance_transforms(PyRenderer &self, const Matrices &matrices) {
+    std::vector<Transform> transforms(matrices.shape(0));
+    std::memcpy(transforms.data(), matrices.data(), matrices.shape(0) * 12 * sizeof(float));
+    nb::gil_scoped_release release;
+    std::lock_guard<std::mutex> lock(self.mutex);
+    self.renderer.set_instance_transforms(transforms);
+}
+
+void set_instance_transform_list(PyRenderer &self, const std::vector<Transform> &transforms) {
+    nb::gil_scoped_release release;
+    std::lock_guard<std::mutex> lock(self.mutex);
+    self.renderer.set_instance_transforms(transforms);
+}
 
 using Image = nb::ndarray<nb::numpy, uint8_t, nb::shape<-1, -1, 3>, nb::c_contig>;
 
@@ -195,6 +239,70 @@ NB_MODULE(_core, m) {
                 fmt(p.checker_scale) + ")";
         });
 
+    nb::class_<Transform>(m, "Transform",
+        "Where a mesh instance is in the world: an affine map as a 3x4 matrix. "
+        "Make one with make_transform(), or from a 3x4 or 4x4 numpy matrix.")
+        .def("__init__",
+            [](Transform *self, const Matrix &matrix) { new (self) Transform(transform_from_matrix(matrix)); },
+            "matrix"_a)
+        .def_prop_ro("matrix", [](const Transform &t) {
+            auto *data = new float[12];
+            std::memcpy(data, t.m, sizeof(t.m));
+            nb::capsule owner(data, [](void *p) noexcept { delete[] static_cast<float *>(p); });
+            return nb::ndarray<nb::numpy, float, nb::shape<3, 4>>(data, {3, 4}, owner);
+        // The array brings its own owner, so the property's default reference_internal policy would clash.
+        }, nb::rv_policy::move, "The top three rows of the 4x4 matrix, as a (3, 4) float32 array.")
+        .def("__repr__", [](const Transform &t) {
+            return "Transform(position=" + fmt(Vec3{t.m[3], t.m[7], t.m[11]}) + ", ...)";
+        });
+
+    m.def("identity_transform", &identity_transform, "The transform that leaves a mesh where it is.");
+    m.def("make_transform",
+        [](const Vec3 &position, const std::array<float, 4> &rotation, const float scale) {
+            return make_transform(position, Quat{rotation[0], rotation[1], rotation[2], rotation[3]}, scale);
+        },
+        "position"_a = Vec3{0.0f, 0.0f, 0.0f}, "rotation"_a = std::array<float, 4>{0.0f, 0.0f, 0.0f, 1.0f},
+        "scale"_a = 1.0f,
+        "Scale, then rotate, then translate. rotation is a quaternion (x, y, z, w), the order "
+        "Warp, MuJoCo and Newton use; it is normalized for you.");
+
+    nb::class_<Mesh>(m, "Mesh",
+        "Triangle geometry, shared by every instance that uses it. Its BVH is built once, "
+        "when a Renderer is made.")
+        .def("__init__",
+            [](Mesh *self, const Vertices &vertices, const Triangles &triangles) {
+                new (self) Mesh(make_mesh(vertices, triangles));
+            },
+            "vertices"_a, "triangles"_a,
+            "vertices: (N, 3) float array. triangles: (M, 3) integer array of vertex indices. "
+            "Winding does not matter; triangles are two-sided.")
+        .def_prop_ro("vertex_count", [](const Mesh &mesh) { return mesh.vertices.size(); })
+        .def_prop_ro("triangle_count", [](const Mesh &mesh) { return mesh.indices.size() / 3; })
+        .def("__repr__", [](const Mesh &mesh) {
+            return "Mesh(" + std::to_string(mesh.vertices.size()) + " vertices, " +
+                std::to_string(mesh.indices.size() / 3) + " triangles)";
+        });
+
+    m.def("make_box", &make_box, "half_extents"_a, "A box centred on the origin, 12 triangles.");
+    m.def("make_icosphere", &make_icosphere, "radius"_a, "subdivisions"_a = 3,
+        "A sphere centred on the origin: 20 * 4**subdivisions triangles.");
+
+    nb::class_<Instance>(m, "Instance",
+        "One placement of a mesh: which mesh (an index into the Renderer's meshes), where, and "
+        "what it is made of.")
+        .def("__init__",
+            [](Instance *self, const int mesh, const Transform &transform, const Material &material) {
+                new (self) Instance{mesh, transform, material};
+            },
+            "mesh"_a, "transform"_a = identity_transform(),
+            "material"_a = Material{{0.8f, 0.8f, 0.8f}, 0.9f, 0.1f, 0.0f, 50.0f})
+        .def_rw("mesh", &Instance::mesh)
+        .def_rw("transform", &Instance::transform)
+        .def_rw("material", &Instance::material)
+        .def("__repr__", [](const Instance &i) {
+            return "Instance(mesh=" + std::to_string(i.mesh) + ", material=" + repr(i.material) + ")";
+        });
+
     nb::class_<Camera>(m, "Camera", "Create with make_camera().")
         .def_ro("position", &Camera::position)
         .def_ro("right", &Camera::right)
@@ -218,8 +326,17 @@ NB_MODULE(_core, m) {
 
     nb::class_<PyRenderer>(m, "Renderer",
         "One scene and its frame buffers on the GPU. Safe to share between threads.")
-        .def(nb::init<int, int, const std::vector<Sphere> &, const std::vector<Light> &, const Plane &>(),
-            "width"_a, "height"_a, "spheres"_a, "lights"_a, "floor"_a = Plane{})
+        .def(nb::init<int, int, const std::vector<Sphere> &, const std::vector<Light> &, const Plane &,
+                 const std::vector<Mesh> &, const std::vector<Instance> &>(),
+            "width"_a, "height"_a, "spheres"_a, "lights"_a, "floor"_a = Plane{},
+            "meshes"_a = std::vector<Mesh>{}, "instances"_a = std::vector<Instance>{})
+        .def("set_instance_transforms", &set_instance_transforms, "transforms"_a,
+            "Move the instances: an (N, 3, 4) float array, one 3x4 matrix per instance in the "
+            "order they were given. Only the small BVH over instances is updated, so this is the "
+            "cheap per-frame call for a simulation. Render with frame=0 afterwards.")
+        .def("set_instance_transforms", &set_instance_transform_list, "transforms"_a,
+            "The same, from a list of Transform objects.")
+        .def_prop_ro("instance_count", [](PyRenderer &self) { return self.renderer.instance_count(); })
         .def("render", &render, "camera"_a, "frame"_a = 0, "samples_per_frame"_a = 1,
             "Trace one frame and return it as a (height, width, 3) uint8 RGB array.\n\n"
             "frame 0 starts a fresh image. Rendering again with frame 1, 2, ... while the "

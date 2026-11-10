@@ -9,6 +9,7 @@
 # ...and un-ignore only what defines the project.
 !/.gitignore
 !/CMakeLists.txt
+!/Makefile
 !/src/**
 !/include/**
 !/cmake/**

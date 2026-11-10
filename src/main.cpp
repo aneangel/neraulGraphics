@@ -1,8 +1,11 @@
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
+#include <cstdlib>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -30,6 +33,45 @@ namespace {
         return {cosf(pitch) * sinf(yaw), sinf(pitch), -cosf(pitch) * cosf(yaw)};
     }
 
+    // Rotation of `angle` radians about a unit axis, as the quaternion make_transform takes.
+    Quat axis_angle(const Vec3 &axis, const float angle) {
+        const float s = std::sin(0.5f * angle);
+        return {axis.x * s, axis.y * s, axis.z * s, std::cos(0.5f * angle)};
+    }
+
+    // Deterministic 0..1 values, so the same --instances N always makes the same scene.
+    float hash01(uint32_t x) {
+        x ^= x >> 16; x *= 0x7feb352dU; x ^= x >> 15; x *= 0x846ca68bU; x ^= x >> 16;
+        return static_cast<float>(x >> 8) / static_cast<float>(1 << 24);
+    }
+
+    // One spinning, bobbing body. The mesh is shared; only this record is per-body.
+    struct Body {
+        Vec3 position;
+        Vec3 axis;
+        float spin;   // radians per second
+        float scale;
+        float phase;
+    };
+
+    std::vector<Body> make_bodies(const int count) {
+        std::vector<Body> bodies;
+        bodies.reserve(count);
+        for (int i = 0; i < count; ++i) {
+            const uint32_t k = static_cast<uint32_t>(i) * 8u;
+            Vec3 axis = {hash01(k + 3) - 0.5f, hash01(k + 4) - 0.5f, hash01(k + 5) - 0.5f};
+            axis = normalize(axis + Vec3{0.0f, 0.05f, 0.0f});
+            bodies.push_back({{-25.0f + 50.0f * hash01(k), -3.0f + 15.0f * hash01(k + 1), -12.0f - 60.0f * hash01(k + 2)},
+                axis, 0.5f + 2.0f * hash01(k + 6), 0.3f + 0.5f * hash01(k + 7), 6.28f * hash01(k + 8)});
+        }
+        return bodies;
+    }
+
+    Transform body_transform(const Body &b, const float time) {
+        const Vec3 p = {b.position.x, b.position.y + 0.5f * std::sin(time + b.phase), b.position.z};
+        return make_transform(p, axis_angle(b.axis, b.spin * time + b.phase), b.scale);
+    }
+
     void save_ppm(const uint32_t *pixels, const int width, const int height, const std::string &filename) {
         std::ofstream ofs(filename, std::ios::binary);
         ofs << "P6\n" << width << " " << height << "\n255\n";
@@ -43,7 +85,7 @@ namespace {
     }
 }
 
-int run() {
+int run(const int instance_count) {
     constexpr int width = 1920;
     constexpr int height = 1080;
     constexpr float fov = M_PI / 2;
@@ -80,9 +122,23 @@ int run() {
     floor.checker_scale = 0.5f;
     floor.material = make_material(Vec3{1.0f, 1.0f, 1.0f}, 1.0f, 0.0f, 0.0f, 1.0f);
 
+    // Spinning shapes for --instances N: two meshes shared by every body, so adding
+    // bodies adds instances, not geometry.
+    const std::vector<Mesh> meshes = {make_box({1.0f, 1.0f, 1.0f}), make_icosphere(1.0f, 2)};
+    const std::vector<Body> bodies = make_bodies(instance_count);
+    std::vector<Instance> instances;
+    std::vector<Transform> transforms(bodies.size());
+    for (size_t i = 0; i < bodies.size(); ++i) {
+        const Vec3 color = {0.2f + 0.8f * hash01(i * 8u + 9u), 0.2f + 0.8f * hash01(i * 8u + 10u), 0.2f + 0.8f * hash01(i * 8u + 11u)};
+        instances.push_back({static_cast<int>(i % 2), body_transform(bodies[i], 0.0f),
+            make_material(color, 0.8f, 0.3f, 0.0f, 40.0f)});
+    }
+
     // Built before the window, so a bad scene is reported without one flashing up.
     // Frees its device memory when it goes out of scope.
-    Renderer gpu_renderer(width, height, spheres, lights, floor);
+    Renderer gpu_renderer(width, height, spheres, lights, floor, meshes, instances);
+    float update_ms = 0.0f;
+    float time = 0.0f;
 
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         std::cerr << "SDL_Init: " << SDL_GetError() << "\n";
@@ -159,8 +215,18 @@ int run() {
         if (keys[SDL_SCANCODE_Q]) position -= world_up * speed;
 
         // Any camera change invalidates the accumulated samples, so the average restarts.
-        const bool moved = position.x != prev_position.x || position.y != prev_position.y ||
+        bool moved = position.x != prev_position.x || position.y != prev_position.y ||
             position.z != prev_position.z || yaw != prev_yaw || pitch != prev_pitch;
+
+        // Moving bodies changes the picture too, so with any instances the image never settles.
+        if (!bodies.empty()) {
+            time += dt;
+            const auto start = std::chrono::steady_clock::now();
+            for (size_t i = 0; i < bodies.size(); ++i) transforms[i] = body_transform(bodies[i], time);
+            gpu_renderer.set_instance_transforms(transforms);
+            update_ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
+            moved = true;
+        }
         frame = moved ? 0 : frame + 1;
 
         const Camera camera = make_camera(position, position + forward_from_angles(yaw, pitch),
@@ -173,10 +239,14 @@ int run() {
         SDL_RenderCopy(renderer, texture, nullptr, nullptr);
         SDL_RenderPresent(renderer);
 
-        char title[160];
+        char title[200];
         snprintf(title, sizeof(title), "raytracer  %dx%d  %.1f fps  kernel %.2f ms  %d spp  pos %.1f %.1f %.1f",
             width, height, 1.f / dt, gpu_renderer.last_kernel_ms(), (frame + 1) * samples_per_frame,
             position.x, position.y, position.z);
+        if (!bodies.empty()) {
+            const size_t used = strlen(title);
+            snprintf(title + used, sizeof(title) - used, "  %zu bodies  update %.2f ms", bodies.size(), update_ms);
+        }
         SDL_SetWindowTitle(window, title);
     }
 
@@ -188,9 +258,25 @@ int run() {
 }
 
 // The renderer reports failures as exceptions; here they become a message and an exit status.
-int main(int, char **) {
+int main(const int argc, char **argv) {
+    int instance_count = 0;
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--instances" && i + 1 < argc) {
+            instance_count = std::atoi(argv[++i]);
+        } else {
+            std::cerr << "usage: " << argv[0] << " [--instances N]\n"
+                      << "  --instances N  add N spinning boxes and spheres, to see how the BVH copes\n";
+            return arg == "--help" ? 0 : 1;
+        }
+    }
+    if (instance_count < 0) {
+        std::cerr << "error: --instances must be 0 or more\n";
+        return 1;
+    }
+
     try {
-        return run();
+        return run(instance_count);
     } catch (const std::exception &e) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;

@@ -48,7 +48,11 @@ find_package(CUDAToolkit REQUIRED)
 # ---------------------------------------------------------------- library --
 
 # The renderer on its own: no window, no SDL. Consumers link neraulgraphics::core.
-add_library(neraulgraphics_core STATIC src/render_gpu.cu)
+add_library(neraulgraphics_core STATIC
+    src/render_gpu.cu
+    src/bvh.cpp
+    src/mesh.cpp
+    src/mesh_build.cpp)
 add_library(neraulgraphics::core ALIAS neraulgraphics_core)
 
 configure_file(cmake/version.h.in ${CMAKE_CURRENT_BINARY_DIR}/include/neraulgraphics/version.h
@@ -56,11 +60,12 @@ configure_file(cmake/version.h.in ${CMAKE_CURRENT_BINARY_DIR}/include/neraulgrap
 
 # The public headers. BASE_DIRS makes these the include path, both here and once
 # installed, so every consumer writes #include <neraulgraphics/renderer.h>.
-# geom_gpu.cuh and device_scene.cuh stay in src/: they are CUDA-only internals.
+# Everything in src/ (the BVH, the device traversal) stays private to the library.
 target_sources(neraulgraphics_core PUBLIC
     FILE_SET HEADERS
     BASE_DIRS include ${CMAKE_CURRENT_BINARY_DIR}/include
     FILES
+        include/neraulgraphics/mesh.h
         include/neraulgraphics/renderer.h
         include/neraulgraphics/scene.h
         ${CMAKE_CURRENT_BINARY_DIR}/include/neraulgraphics/version.h)
@@ -111,6 +116,8 @@ if (NERAULGRAPHICS_BUILD_TESTS)
     # Plain C++ built with -ffast-math, like the viewer: the checks must survive it.
     add_executable(neraulgraphics-tests tests/test_renderer.cpp)
     target_link_libraries(neraulgraphics-tests PRIVATE neraulgraphics::core)
+    # The BVH builder is library-private, but its tests want it directly.
+    target_include_directories(neraulgraphics-tests PRIVATE src)
     target_compile_options(neraulgraphics-tests PRIVATE
         $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:-ffast-math>)
     add_test(NAME renderer COMMAND neraulgraphics-tests)

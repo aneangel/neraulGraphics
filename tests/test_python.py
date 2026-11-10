@@ -172,3 +172,108 @@ def test_render_rejects_bad_arguments_and_recovers(gpu):
         r.render(straight_up, 3)
     # The rejected calls changed nothing: frame 3 continues the same average.
     assert np.array_equal(r.render(camera(), 3), accumulate(ng.Renderer(W, H, *scene()), 4))
+
+
+# ------------------------------------------------------------------ meshes --
+
+def test_make_transform_matches_the_quaternion_convention():
+    # 90 degrees about z, as (x, y, z, w): x axis goes to y axis. XYZW, not WXYZ.
+    q = (0.0, 0.0, np.sin(np.pi / 4), np.cos(np.pi / 4))
+    m = ng.make_transform((1, 2, 3), q, scale=2.0).matrix
+    assert m.shape == (3, 4) and m.dtype == np.float32
+    assert np.allclose(m @ [1, 0, 0, 1], [1, 2 + 2, 3], atol=1e-6)
+    assert np.allclose(m @ [0, 1, 0, 1], [1 - 2, 2, 3], atol=1e-6)
+
+
+def test_transforms_come_from_3x4_or_4x4_matrices():
+    m = np.eye(4, dtype=np.float32)
+    m[:3, 3] = (4, 5, 6)
+    assert np.array_equal(ng.Transform(m).matrix, m[:3])
+    assert np.array_equal(ng.Transform(m[:3].copy()).matrix, m[:3])
+    with pytest.raises(ValueError):
+        ng.Transform(np.zeros((2, 4), dtype=np.float32))
+
+
+def test_zero_quaternion_is_rejected():
+    with pytest.raises(ValueError, match="quaternion"):
+        ng.make_transform((0, 0, 0), (0, 0, 0, 0))
+
+
+def test_mesh_from_numpy_accepts_common_dtypes():
+    box = ng.make_box((1, 1, 1))
+    assert box.triangle_count == 12 and box.vertex_count == 8
+    vertices = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float64)  # float64 is converted
+    for dtype in (np.int32, np.int64, np.uint32):
+        mesh = ng.Mesh(vertices, np.array([[0, 1, 2]], dtype=dtype))
+        assert mesh.triangle_count == 1
+
+
+def test_mesh_rejects_bad_shapes_and_indices(gpu):
+    with pytest.raises(TypeError):
+        ng.Mesh(np.zeros((4, 2), dtype=np.float32), np.zeros((1, 3), dtype=np.uint32))
+    # A well-shaped mesh that points past its vertices is caught when a Renderer is made.
+    bad = ng.Mesh(np.zeros((3, 3), dtype=np.float32), np.array([[0, 1, 7]], dtype=np.uint32))
+    with pytest.raises(ValueError, match="index"):
+        ng.Renderer(W, H, [], [], meshes=[bad], instances=[ng.Instance(0)])
+
+
+def mesh_scene(x=0.0):
+    red = ng.Material(diffuse_color=(0.6, 0.15, 0.15))
+    spheres, lights, floor = scene()
+    return dict(spheres=spheres, lights=lights, floor=floor, meshes=[ng.make_icosphere(1.0, 3)],
+                instances=[ng.Instance(0, ng.make_transform((x, 0, -12), scale=2.0), red)])
+
+
+def test_instances_render_and_match_an_analytic_sphere(gpu):
+    spheres, lights, floor = scene()
+    red = ng.Material(diffuse_color=(0.6, 0.15, 0.15))
+    analytic = ng.Renderer(W, H, spheres + [ng.Sphere((3, 0, -12), 2, red)], lights, floor).render(camera())
+    meshed = ng.Renderer(W, H, **mesh_scene(3.0)).render(camera())
+    nothing = ng.Renderer(W, H, spheres, lights, floor).render(camera())
+    assert np.abs(meshed.astype(int) - nothing.astype(int)).mean() > 0.3  # the mesh is there
+    assert np.abs(meshed.astype(int) - analytic.astype(int)).mean() < 1.0  # and it is the right shape
+
+
+def test_set_instance_transforms_from_array_and_list(gpu):
+    r = ng.Renderer(W, H, **mesh_scene(-3.0))
+    assert r.instance_count == 1
+    before = r.render(camera())
+
+    moved = np.array([ng.make_transform((3, 0, -12), scale=2.0).matrix])  # (1, 3, 4)
+    r.set_instance_transforms(moved)
+    after = r.render(camera())
+    assert not np.array_equal(before, after)
+    # Moving is the same as building there: this is the whole point of the two-level structure.
+    assert np.array_equal(after, ng.Renderer(W, H, **mesh_scene(3.0)).render(camera()))
+
+    r.set_instance_transforms([ng.make_transform((-3, 0, -12), scale=2.0)])  # a list of Transform
+    assert np.array_equal(r.render(camera()), before)
+
+
+def test_set_instance_transforms_rejects_bad_input_and_changes_nothing(gpu):
+    r = ng.Renderer(W, H, **mesh_scene())
+    before = r.render(camera())
+    with pytest.raises(ValueError, match="one per instance"):
+        r.set_instance_transforms(np.zeros((2, 3, 4), dtype=np.float32))
+    with pytest.raises(ValueError, match="singular"):
+        r.set_instance_transforms(np.zeros((1, 3, 4), dtype=np.float32))
+    nan = ng.make_transform((0, 0, 0)).matrix.copy()
+    nan[0, 3] = np.nan
+    with pytest.raises(ValueError, match="NaN"):
+        r.set_instance_transforms(nan[None])
+    with pytest.raises(TypeError):
+        r.set_instance_transforms(np.zeros((1, 4, 4), dtype=np.float32))
+    assert np.array_equal(r.render(camera()), before)
+
+
+def test_many_instances_in_one_call(gpu):
+    rng = np.random.default_rng(0)
+    n = 2000
+    transforms = [ng.make_transform(rng.uniform((-9, -3, -28), (9, 3, -12)), rng.normal(size=4) + (0, 0, 0, 3),
+                                    scale=rng.uniform(0.3, 0.8)) for _ in range(n)]
+    box = ng.make_box((0.5, 0.5, 0.5))
+    r = ng.Renderer(W, H, [], scene()[1], scene()[2], meshes=[box],
+                    instances=[ng.Instance(0, t) for t in transforms])
+    assert r.instance_count == n
+    assert r.render(camera()).std() > 0
+    r.set_instance_transforms(np.array([t.matrix for t in transforms]))  # all 2000 in one call

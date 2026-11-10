@@ -4,6 +4,8 @@
 #include <string>
 #include <neraulgraphics/renderer.h>
 #include "device_scene.cuh"
+#include "mesh_build.h"
+#include "mesh_gpu.cuh"
 
 // Throws neraulgraphics::CudaError naming the failed call and where it was made.
 #define CUDA_CHECK(call)                                                                        \
@@ -44,6 +46,7 @@ struct SceneParams {
     Sphere spheres[MAX_SPHERES];
     Light lights[MAX_LIGHTS];
     Plane floor;
+    MeshScene mesh;
     int sphere_count;
     int light_count;
 };
@@ -92,12 +95,26 @@ __device__ bool scene_intersect(const SceneParams &s, const float3 &origin, cons
         }
     }
 
-    if (best_sphere < 0 && !hit_floor) return false;
+    // Meshes go last so the BVH walk starts with the closest hit so far as its
+    // limit, and skips every box beyond it.
+    int best_instance = -1;
+    int best_triangle = -1;
+    if (s.mesh.instance_count > 0 && mesh_intersect(s.mesh, origin, dir, best, best_instance, best_triangle)) {
+        best_sphere = -1;
+        hit_floor = false;
+    } else {
+        best_instance = -1;
+    }
+
+    if (best_sphere < 0 && !hit_floor && best_instance < 0) return false;
 
     hit.t = best;
     hit.point = origin + dir * best;
 
-    if (hit_floor) {
+    if (best_instance >= 0) {
+        hit.normal = mesh_normal(s.mesh, best_instance, best_triangle, dir);
+        hit.material = s.mesh.instances[best_instance].material;
+    } else if (hit_floor) {
         hit.normal = make_float3(0.0f, 1.0f, 0.0f);
         hit.material = s.floor.material;
         const int cx = static_cast<int>(floorf(hit.point.x * s.floor.checker_scale));
@@ -125,7 +142,8 @@ __device__ bool scene_occluded(const SceneParams &s, const float3 &origin, const
                 return true;
         }
     }
-    return false;
+
+    return s.mesh.instance_count > 0 && mesh_occluded(s.mesh, origin, dir, max_dist);
 }
 
 // Vertical gradient background.
@@ -309,21 +327,91 @@ struct Renderer::Impl {
     float kernel_ms = 0.0f;
     device::SceneParams params{};
 
+    // Meshes. The bottom-level arrays are built once and never change; the top-level
+    // ones are rewritten by every set_instance_transforms().
+    bvh::Node *d_blas = nullptr;
+    float4 *d_triangles = nullptr;
+    bvh::Node *d_tlas = nullptr;
+    int *d_tlas_instance = nullptr;
+    device::Instance *d_instances = nullptr;
+    std::vector<int> instance_mesh;
+    std::vector<neraulgraphics::Material> instance_material;
+    std::vector<int> mesh_root;
+    std::vector<bvh::Aabb> mesh_bounds;
+    // The CPU copy of the top-level BVH, kept so an update can refit it in place.
+    bvh::Bvh tlas;
+    float tlas_built_cost = 0.0f;  // sah_cost() right after the last full build
+
     // Destructors must not throw, so CUDA errors here are ignored. After a sticky
     // fault these calls fail anyway, and the process is about to report it.
     ~Impl() {
         cudaFree(d_accum);
         cudaFree(d_pixels);
         cudaFreeHost(h_pixels);
+        cudaFree(d_blas);
+        cudaFree(d_triangles);
+        cudaFree(d_tlas);
+        cudaFree(d_tlas_instance);
+        cudaFree(d_instances);
         if (ev_start) cudaEventDestroy(ev_start);
         if (ev_stop) cudaEventDestroy(ev_stop);
     }
 };
 
+namespace {
+
+// Brings the top level over the instances up to date and uploads it. The bottom level is not touched.
+// A template only because Renderer::Impl is private and so cannot be named out here.
+template <class ImplT>
+void upload_instances(ImplT &r, const std::vector<Transform> &transforms) {
+    const size_t n = transforms.size();
+    std::vector<device::Instance> instances(n);
+    std::vector<bvh::Aabb> boxes(n);
+    for (size_t i = 0; i < n; ++i) {
+        Transform inverse;
+        detail::invert_affine(transforms[i], inverse);  // checked invertible before this point
+        device::Instance &d = instances[i];
+        for (int row = 0; row < 3; ++row)
+            d.inv[row] = make_float4(inverse.m[4 * row], inverse.m[4 * row + 1], inverse.m[4 * row + 2],
+                inverse.m[4 * row + 3]);
+        d.blas_root = r.mesh_root[r.instance_mesh[i]];
+        d.material = device::to_device(r.instance_material[i]);
+        boxes[i] = detail::transform_aabb(transforms[i], r.mesh_bounds[r.instance_mesh[i]]);
+    }
+
+    // Refit is one cheap pass; a full build searches for good splits. Refit while the
+    // tree is still good, and build again once the boxes have loosened too far.
+    // 1.3x the cost it had when built is where traces start to visibly slow.
+    constexpr float REBUILD_ABOVE = 1.3f;
+    bool rebuilt = r.tlas.nodes.empty();
+    if (!rebuilt) {
+        bvh::refit(r.tlas, boxes);
+        rebuilt = bvh::sah_cost(r.tlas) > REBUILD_ABOVE * r.tlas_built_cost;
+    }
+    if (rebuilt) {
+        r.tlas = bvh::build(boxes, 1);
+        r.tlas_built_cost = bvh::sah_cost(r.tlas);
+    }
+
+    CUDA_CHECK(cudaMemcpy(r.d_tlas, r.tlas.nodes.data(), r.tlas.nodes.size() * sizeof(bvh::Node),
+        cudaMemcpyHostToDevice));
+    // A refit keeps the leaf order, so the instance indirection only changes on a rebuild.
+    if (rebuilt) {
+        const std::vector<int> leaf_instance(r.tlas.order.begin(), r.tlas.order.end());
+        CUDA_CHECK(cudaMemcpy(r.d_tlas_instance, leaf_instance.data(), n * sizeof(int), cudaMemcpyHostToDevice));
+    }
+    CUDA_CHECK(cudaMemcpy(r.d_instances, instances.data(), n * sizeof(device::Instance),
+        cudaMemcpyHostToDevice));
+}
+
+}  // namespace
+
 Renderer::Renderer(const int width, const int height, const std::vector<Sphere> &spheres,
-    const std::vector<Light> &lights, const Plane &floor) {
+    const std::vector<Light> &lights, const Plane &floor, const std::vector<Mesh> &meshes,
+    const std::vector<Instance> &instances) {
     check_frame_size(width, height);
     check_scene(spheres, lights, floor);
+    detail::check_meshes(meshes, instances);
 
     // Built in a local first: if any CUDA call throws, its destructor frees
     // whatever was already allocated.
@@ -348,6 +436,38 @@ Renderer::Renderer(const int width, const int height, const std::vector<Sphere> 
 
     CUDA_CHECK(cudaEventCreate(&r->ev_start));
     CUDA_CHECK(cudaEventCreate(&r->ev_stop));
+
+    // With no instances there is nothing to build, so a meshless scene pays nothing.
+    if (!instances.empty()) {
+        const detail::BuiltMeshes built = detail::build_meshes(meshes);
+        r->mesh_root = built.roots;
+        r->mesh_bounds = built.bounds;
+        for (const Instance &inst : instances) {
+            r->instance_mesh.push_back(inst.mesh);
+            r->instance_material.push_back(inst.material);
+        }
+
+        // 2n-1 nodes at most for n instances.
+        const size_t n = instances.size();
+        CUDA_CHECK(cudaMalloc(&r->d_blas, built.nodes.size() * sizeof(bvh::Node)));
+        CUDA_CHECK(cudaMalloc(&r->d_triangles, built.triangles.size() * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&r->d_tlas, 2 * n * sizeof(bvh::Node)));
+        CUDA_CHECK(cudaMalloc(&r->d_tlas_instance, n * sizeof(int)));
+        CUDA_CHECK(cudaMalloc(&r->d_instances, n * sizeof(device::Instance)));
+        CUDA_CHECK(cudaMemcpy(r->d_blas, built.nodes.data(), built.nodes.size() * sizeof(bvh::Node),
+            cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(r->d_triangles, built.triangles.data(), built.triangles.size() * sizeof(float),
+            cudaMemcpyHostToDevice));
+
+        std::vector<Transform> transforms;
+        transforms.reserve(n);
+        for (const Instance &inst : instances) transforms.push_back(inst.transform);
+        upload_instances(*r, transforms);
+
+        // Pointers are stable from here: set_instance_transforms() rewrites these buffers in place.
+        r->params.mesh = device::MeshScene{r->d_tlas, r->d_tlas_instance, r->d_instances, r->d_blas,
+            r->d_triangles, static_cast<int>(n)};
+    }
 
     impl_ = std::move(r);
 }
@@ -389,6 +509,18 @@ const uint32_t *Renderer::render(const Camera &camera, const int frame, const in
 
     return r.h_pixels;
 }
+
+void Renderer::set_instance_transforms(const std::vector<Transform> &transforms) {
+    Impl &r = state();
+    if (transforms.size() != r.instance_mesh.size())
+        throw std::invalid_argument("expected " + std::to_string(r.instance_mesh.size()) +
+            " transforms, one per instance, got " + std::to_string(transforms.size()));
+    for (size_t i = 0; i < transforms.size(); ++i)
+        detail::check_transform(transforms[i], "transform " + std::to_string(i));
+    if (!transforms.empty()) upload_instances(r, transforms);
+}
+
+int Renderer::instance_count() const { return static_cast<int>(state().instance_mesh.size()); }
 
 float Renderer::last_kernel_ms() const { return state().kernel_ms; }
 

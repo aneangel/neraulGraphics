@@ -19,6 +19,7 @@
 #include <vector>
 // Through the package prefix, not "": version.h is generated into the build tree,
 // so it sits beside this header only once installed.
+#include <neraulgraphics/mesh.h>
 #include <neraulgraphics/scene.h>
 #include <neraulgraphics/version.h>
 
@@ -42,11 +43,19 @@ class Renderer {
 public:
     // Copies the scene and allocates the frame buffers. The default floor is no floor.
     //
+    // meshes are shared geometry and instances place them: each Instance names a
+    // mesh by its index here and carries its own Transform and Material. Any number
+    // of instances may use one mesh, and the count of instances is not limited the
+    // way spheres and lights are. Each mesh's BVH is built here, once.
+    //
     // Throws std::invalid_argument if width or height is not positive, if there are
     // more than MAX_SPHERES spheres or MAX_LIGHTS lights, if a sphere radius is not
-    // positive, if a light radius is negative, or if any value is NaN or infinite.
+    // positive, if a light radius is negative, if a mesh has no triangles or an index
+    // out of range, if an instance names a mesh that does not exist or has a
+    // singular transform, or if any value is NaN or infinite.
     Renderer(int width, int height, const std::vector<Sphere> &spheres,
-        const std::vector<Light> &lights, const Plane &floor = Plane{});
+        const std::vector<Light> &lights, const Plane &floor = Plane{},
+        const std::vector<Mesh> &meshes = {}, const std::vector<Instance> &instances = {});
     ~Renderer();
 
     // Owns device memory, so it can be moved but not copied.
@@ -67,6 +76,18 @@ public:
     // A NaN reaching the running average would blacken that pixel until the next
     // restart, so a camera with any non-finite value is rejected as well.
     const uint32_t *render(const Camera &camera, int frame, int samples_per_frame);
+
+    // Moves the instances: transforms[i] replaces instance i's Transform. Only the
+    // top-level BVH over instances is rebuilt (on the host, then uploaded); the
+    // meshes' own BVHs are untouched, so this is the cheap per-frame update for a
+    // simulation. Camera and accumulation are separate: call render() with frame 0
+    // afterwards, since the image built up so far shows the old positions.
+    //
+    // Throws std::invalid_argument, changing nothing, if transforms.size() is not
+    // the instance count or a transform is NaN, infinite or singular.
+    void set_instance_transforms(const std::vector<Transform> &transforms);
+
+    int instance_count() const;
 
     // GPU time of the last render(), from CUDA events. Excludes the host copy.
     float last_kernel_ms() const;
