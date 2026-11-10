@@ -277,3 +277,54 @@ def test_many_instances_in_one_call(gpu):
     assert r.instance_count == n
     assert r.render(camera()).std() > 0
     r.set_instance_transforms(np.array([t.matrix for t in transforms]))  # all 2000 in one call
+
+
+# ------------------------------------------------------------------ devices --
+
+def test_cuda_available_is_a_bool():
+    assert isinstance(ng.cuda_available(), bool)
+
+
+def test_device_defaults_to_auto_and_reports_what_it_chose():
+    r = ng.Renderer(W, H, *scene())  # works with or without a GPU
+    assert r.device == ("cuda" if ng.cuda_available() else "cpu")
+
+
+def test_cpu_device_always_works_and_draws():
+    r = ng.Renderer(W, H, *scene(), device="cpu")
+    image = r.render(camera())
+    assert r.device == "cpu" and image.shape == (H, W, 3) and image.std() > 0
+    assert r.last_kernel_ms > 0
+
+
+def test_bad_device_name_is_rejected():
+    with pytest.raises(ValueError, match="device must be"):
+        ng.Renderer(W, H, *scene(), device="vulkan")
+
+
+def test_cuda_device_without_a_gpu_raises_cuda_error():
+    try:
+        ng.Renderer(W, H, *scene(), device="cuda")
+    except ng.CudaError:
+        return  # no GPU: asking for one by name is an error, which is what this checks
+    pytest.skip("this machine has a GPU, so there is no error to see")
+
+
+def test_cpu_and_gpu_draw_the_same_picture():
+    try:
+        gpu = ng.Renderer(W, H, *scene(), device="cuda")
+    except ng.CudaError:
+        pytest.skip("no usable CUDA GPU")
+    cpu = ng.Renderer(W, H, *scene(), device="cpu")
+    a, b = accumulate(gpu, 4).astype(int), accumulate(cpu, 4).astype(int)
+    assert np.abs(a - b).mean() < 0.5
+
+
+def test_instances_and_textures_work_on_the_cpu():
+    box = ng.make_box((0.5, 0.5, 0.5))
+    spheres, lights, floor = scene()
+    r = ng.Renderer(W, H, spheres, lights, floor, meshes=[box], instances=[ng.Instance(0, ng.make_transform((2, 0, -10)))],
+                    device="cpu")
+    before = r.render(camera())
+    r.set_instance_transforms(np.array([ng.make_transform((-2, 0, -10)).matrix]))
+    assert not np.array_equal(before, r.render(camera()))

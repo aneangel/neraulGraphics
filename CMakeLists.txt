@@ -23,7 +23,25 @@ endif()
 
 # The one place the version is written. version.h, the find_package version file,
 # the Python package metadata and neraulgraphics.__version__ all read it from here.
-project(neraulgraphics VERSION 0.3.0 LANGUAGES CXX CUDA)
+project(neraulgraphics VERSION 0.3.0 LANGUAGES CXX)
+
+# CUDA is optional. Without it the library still builds and renders, on the CPU, with nothing but a
+# C++17 compiler. AUTO uses CUDA when a CUDA compiler is found; ON requires it; OFF skips it.
+set(NERAULGRAPHICS_CUDA AUTO CACHE STRING "Build the CUDA (NVIDIA GPU) backend: AUTO, ON or OFF")
+set_property(CACHE NERAULGRAPHICS_CUDA PROPERTY STRINGS AUTO ON OFF)
+set(NERAULGRAPHICS_WITH_CUDA OFF)
+if (NERAULGRAPHICS_CUDA STREQUAL "ON")
+    enable_language(CUDA)
+    set(NERAULGRAPHICS_WITH_CUDA ON)
+elseif (NERAULGRAPHICS_CUDA STREQUAL "AUTO")
+    include(CheckLanguage)
+    check_language(CUDA)
+    if (CMAKE_CUDA_COMPILER)
+        enable_language(CUDA)
+        set(NERAULGRAPHICS_WITH_CUDA ON)
+    endif()
+endif()
+message(STATUS "neraulgraphics: CUDA backend ${NERAULGRAPHICS_WITH_CUDA}; the CPU backend is always built")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -43,16 +61,26 @@ option(NERAULGRAPHICS_BUILD_PYTHON "Build the Python module (pip install . sets 
 set(NERAULGRAPHICS_CUDA_RUNTIME Shared CACHE STRING "How to link the CUDA runtime: Shared or Static")
 set_property(CACHE NERAULGRAPHICS_CUDA_RUNTIME PROPERTY STRINGS Shared Static)
 
-find_package(CUDAToolkit REQUIRED)
+find_package(Threads REQUIRED)
+if (NERAULGRAPHICS_WITH_CUDA)
+    find_package(CUDAToolkit REQUIRED)
+endif()
 
 # ---------------------------------------------------------------- library --
 
 # The renderer on its own: no window, no SDL. Consumers link neraulgraphics::core.
 add_library(neraulgraphics_core STATIC
-    src/render_gpu.cu
+    src/renderer.cpp
+    src/cpu_backend.cpp
+    src/instances.cpp
     src/bvh.cpp
     src/mesh.cpp
     src/mesh_build.cpp)
+if (NERAULGRAPHICS_WITH_CUDA)
+    target_sources(neraulgraphics_core PRIVATE src/cuda_backend.cu)
+else()
+    target_sources(neraulgraphics_core PRIVATE src/cuda_backend_stub.cpp)
+endif()
 add_library(neraulgraphics::core ALIAS neraulgraphics_core)
 
 configure_file(cmake/version.h.in ${CMAKE_CURRENT_BINARY_DIR}/include/neraulgraphics/version.h
@@ -60,7 +88,7 @@ configure_file(cmake/version.h.in ${CMAKE_CURRENT_BINARY_DIR}/include/neraulgrap
 
 # The public headers. BASE_DIRS makes these the include path, both here and once
 # installed, so every consumer writes #include <neraulgraphics/renderer.h>.
-# Everything in src/ (the BVH, the device traversal) stays private to the library.
+# Everything in src/ (the BVH, the rendering core, the backends) stays private to the library.
 target_sources(neraulgraphics_core PUBLIC
     FILE_SET HEADERS
     BASE_DIRS include ${CMAKE_CURRENT_BINARY_DIR}/include
@@ -72,12 +100,15 @@ target_sources(neraulgraphics_core PUBLIC
 
 target_include_directories(neraulgraphics_core PRIVATE src)
 
-# PRIVATE: the public headers need nothing from CUDA. A static library still
-# carries the runtime to whoever links it, as a link-only dependency.
-if (NERAULGRAPHICS_CUDA_RUNTIME STREQUAL "Static")
-    target_link_libraries(neraulgraphics_core PRIVATE CUDA::cudart_static)
-else()
-    target_link_libraries(neraulgraphics_core PRIVATE CUDA::cudart)
+# PRIVATE: the public headers need nothing from CUDA or threads. A static library still
+# carries them to whoever links it, as link-only dependencies.
+target_link_libraries(neraulgraphics_core PRIVATE Threads::Threads)
+if (NERAULGRAPHICS_WITH_CUDA)
+    if (NERAULGRAPHICS_CUDA_RUNTIME STREQUAL "Static")
+        target_link_libraries(neraulgraphics_core PRIVATE CUDA::cudart_static)
+    else()
+        target_link_libraries(neraulgraphics_core PRIVATE CUDA::cudart)
+    endif()
 endif()
 target_compile_features(neraulgraphics_core PUBLIC cxx_std_17)
 

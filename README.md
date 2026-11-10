@@ -1,9 +1,10 @@
 # neraulGraphics
 
-A GPU-accelerated rendering engine for games and simulation, built on CUDA raytracing
-and usable as a library from Python or C++. Actively developed.
+A raytracing rendering engine for games and simulation, usable as a library from Python or
+C++. It runs on an NVIDIA GPU through CUDA when there is one, and on the CPU everywhere else.
+Actively developed.
 
-![Screenshot](docs/screenshot.png)
+![Screenshot](https://raw.githubusercontent.com/aneangel/neraulGraphics/main/docs/screenshot.png)
 
 Hand it a scene and a camera, get an image back. Every pixel is traced with real
 rays, so mirrors, shadows and reflections work without tricks, and the picture
@@ -11,6 +12,7 @@ sharpens the longer the camera holds still.
 
 ## Features
 
+- **Runs anywhere.** An NVIDIA GPU is used automatically when present; otherwise every CPU core is. Same picture either way, on Linux, macOS and Windows.
 - **Library first.** `pip install` and `import neraulgraphics`, or `find_package(neraulgraphics)` in C++. No window or engine to adopt.
 - **Meshes and instancing.** Share triangle meshes between any number of instances. Moving an instance only updates a small BVH, so thousands of moving bodies stay cheap.
 - **Dynamic scenes.** `set_instance_transforms()` takes a pose per instance each frame, with poses as position plus `(x, y, z, w)` quaternion, the convention Warp, MuJoCo and Newton use.
@@ -22,15 +24,20 @@ sharpens the longer the camera holds still.
 
 ## Install
 
-You need an NVIDIA GPU and driver, on Linux x86_64.
-
 ```bash
-# built for your GPU (needs the CUDA toolkit)
-pip install git+https://github.com/aneangel/neraulGraphics@v0.3.0
+pip install git+https://github.com/aneangel/neraulGraphics
 ```
 
-Prebuilt wheels that need only the driver are on the
-[releases page](https://github.com/aneangel/neraulGraphics/releases).
+That builds from source, so it needs CMake and a C++17 compiler. If the CUDA toolkit is
+installed it also builds the GPU backend for your card; if not, it builds the CPU backend,
+which needs nothing else. Prebuilt wheels are on the
+[releases page](https://github.com/aneangel/neraulGraphics/releases): Linux x86_64 with the GPU
+backend (needing only the NVIDIA driver, and using the CPU if there is no GPU), and CPU-only
+for macOS (Apple Silicon), Windows and Linux aarch64.
+
+`neraulgraphics.cuda_available()` says whether a GPU will be used, and
+`ng.Renderer(..., device="cpu")` forces the CPU. At 1280x720 a 16-core CPU renders a
+138,000-triangle model in about 17 to 41 ms; a GPU takes under 1 ms.
 
 ## Quick start
 
@@ -66,7 +73,7 @@ takes over the camera. For more control, hand `scene.meshes`, `scene.instances` 
 `scene.textures` to `ng.Renderer` yourself. Reading texture images needs Pillow
 (`pip install neraulgraphics[images]`). Not supported: animation and skinning (a
 skinned model draws in its bind pose), normal and roughness maps, transparency,
-Draco-compressed glTF. See [examples/view_model.py](examples/view_model.py) for a turntable.
+Draco-compressed glTF. See [examples/view_model.py](https://github.com/aneangel/neraulGraphics/blob/main/examples/view_model.py) for a turntable.
 
 ## Rendering a simulation
 
@@ -83,7 +90,7 @@ It draws spheres, boxes, capsules, cylinders, cones, ellipsoids, planes and mesh
 colours the model gives them, and frames the scene and lights it for you. Pass your own
 `camera=` (from `view.camera(position, target)`) or `lights=` to take control. A real
 articulated humanoid renders in under a millisecond a frame. Runnable versions are in
-[examples/](examples/).
+[examples/](https://github.com/aneangel/neraulGraphics/blob/main/examples/).
 
 C++:
 
@@ -106,20 +113,22 @@ make raytracer                         # builds ./raytracer
 make test                              # needs a GPU
 ```
 
-Needs CUDA 12+, CMake 3.28+ and SDL2. Builds for RTX 50-series by default; use
-`make raytracer CMAKE_ARGS="-DCMAKE_CUDA_ARCHITECTURES=native"` for other GPUs.
+Needs CMake 3.28+, a C++17 compiler and SDL2. If CUDA 12+ is installed the viewer uses your
+GPU (built for RTX 50-series by default; `make raytracer CMAKE_ARGS="-DCMAKE_CUDA_ARCHITECTURES=native"`
+for other cards), and otherwise it renders on the CPU. `-DNERAULGRAPHICS_CUDA=OFF` skips CUDA
+even when it is installed.
 
 ## Status
 
-Pre-1.0: the API may change between minor versions (see the [changelog](CHANGELOG.md)).
-Planned next, roughly in order: smooth shading and textures, glTF/OBJ loading, GPU-side
-instance updates for 100k+ moving bodies, and a bridge for rendering Newton and MuJoCo scenes.
+Pre-1.0: the API may change between minor versions (see the [changelog](https://github.com/aneangel/neraulGraphics/blob/main/CHANGELOG.md)).
+Planned next: GPU-side instance updates for 100k+ moving bodies, texture mip-mapping, and
+backends for AMD, Intel and Apple GPUs (see [portability](https://github.com/aneangel/neraulGraphics/blob/main/docs/portability.md)).
 
-More detail, benchmarks and viewer controls are in the [guide](docs/guide.md).
+More detail, benchmarks and viewer controls are in the [guide](https://github.com/aneangel/neraulGraphics/blob/main/docs/guide.md).
 
 ## License
 
-[Apache-2.0](LICENSE).
+[Apache-2.0](https://github.com/aneangel/neraulGraphics/blob/main/LICENSE).
 
 ## Credits
 

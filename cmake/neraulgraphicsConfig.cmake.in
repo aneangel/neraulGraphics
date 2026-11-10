@@ -2,10 +2,13 @@
 
 @PACKAGE_INIT@
 
-# The headers need nothing from CUDA, but the static library still links the CUDA
-# runtime, so that target has to exist before the targets file refers to it.
+# The headers need nothing from CUDA or threads, but the static library still links them, so
+# those targets have to exist before the targets file refers to them.
 include(CMakeFindDependencyMacro)
-find_dependency(CUDAToolkit)
+find_dependency(Threads)
+if (@NERAULGRAPHICS_WITH_CUDA@)
+    find_dependency(CUDAToolkit)
+endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/neraulgraphicsTargets.cmake")
 

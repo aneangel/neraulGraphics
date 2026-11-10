@@ -87,7 +87,7 @@ class SimRenderer:
 
     def __init__(self, width: int, height: int, scene, *, up: Sequence[float],
                  center: Sequence[float], extent: float, lights: Sequence[Light] | None, fov: float,
-                 ambient: float = 0.2) -> None:
+                 ambient: float = 0.2, device: str = "auto") -> None:
         # scene: anything with .meshes, .instances and .textures (a SceneBuilder, or a LoadedScene).
         # center and extent: the middle and half-size of what is worth looking at.
         self.width, self.height, self.fov = width, height, fov
@@ -95,7 +95,8 @@ class SimRenderer:
         self.center = np.asarray(center, dtype=np.float64)
         self.extent = float(max(extent, 1e-3))
         self.renderer = Renderer(width, height, [], list(lights) if lights is not None else self.default_lights(),
-                                 meshes=scene.meshes, instances=scene.instances, textures=scene.textures)
+                                 meshes=scene.meshes, instances=scene.instances, textures=scene.textures,
+                                 device=device)
         # Surfaces turned from every light would be black; a little ambient light keeps them readable.
         self.renderer.ambient = ambient
 

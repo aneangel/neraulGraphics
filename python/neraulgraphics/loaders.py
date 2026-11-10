@@ -66,9 +66,9 @@ class SceneRenderer(SimRenderer):
     """Draws a :class:`LoadedScene`. ``camera()`` frames the whole model; pass ``lights=`` to override."""
 
     def __init__(self, scene: LoadedScene, width: int = 1280, height: int = 720, *, lights=None,
-                 fov: float = 1.0, ambient: float = 0.2) -> None:
+                 fov: float = 1.0, ambient: float = 0.2, device: str = "auto") -> None:
         super().__init__(width, height, scene, up=scene.up, center=scene.center, extent=scene.extent,
-                         lights=lights, fov=fov, ambient=ambient)
+                         lights=lights, fov=fov, ambient=ambient, device=device)
 
     def render(self, camera=None, frame: int = 0, samples_per_frame: int = 1) -> np.ndarray:
         """Draws the model as a ``(height, width, 3)`` uint8 image. Increase ``frame`` to sharpen it."""

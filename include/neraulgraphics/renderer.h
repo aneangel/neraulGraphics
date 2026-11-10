@@ -1,14 +1,16 @@
 #ifndef NERAULGRAPHICS_RENDERER_H
 #define NERAULGRAPHICS_RENDERER_H
 
-// Host-side interface to the CUDA renderer. Callers never see a kernel launch,
-// and this header pulls in no CUDA headers.
+// Host-side interface to the renderer. It runs on an NVIDIA GPU through CUDA when there is
+// one, and on the CPU otherwise, drawing the same image either way. Callers never see a
+// kernel launch, and this header pulls in no CUDA headers.
 //
 // Failures are reported as exceptions, never by exiting, so the program using
 // the renderer decides what an error means:
 //   std::invalid_argument      bad input, rejected before anything reaches the device
 //   std::logic_error           a call on a moved-from Renderer
-//   neraulgraphics::CudaError  the CUDA runtime refused or failed a call
+//   neraulgraphics::CudaError  the CUDA runtime refused or failed a call, or CUDA was asked
+//                              for in a library built without it
 // Every check runs before any state changes, so a rejected call leaves the
 // Renderer exactly as it was.
 
@@ -36,6 +38,18 @@ private:
     int code_;
 };
 
+// Where a Renderer does its tracing.
+enum class Device {
+    Auto,  // CUDA if the library was built with it and a GPU is present, otherwise the CPU
+    Cuda,  // an NVIDIA GPU; throws CudaError if there is none
+    Cpu,   // every core of the machine; slower than a GPU, but needs nothing
+};
+
+// True if this library was built with CUDA and an NVIDIA GPU is present, so Device::Auto
+// would use it. The environment variable NERAULGRAPHICS_DEVICE set to cpu or cuda overrides
+// what Auto chooses (for debugging, or to leave the GPU to something else).
+bool cuda_available();
+
 // One scene and its frame buffers. Each instance owns its own device memory and
 // scene copy, so several can live in one process. The device state sits behind
 // Impl, which keeps CUDA handles out of this header.
@@ -50,6 +64,9 @@ public:
     //
     // textures are images instances can name; see Instance::texture.
     //
+    // device chooses where to trace; see Device. The CPU uses one thread per core, or
+    // NERAULGRAPHICS_THREADS of them if that environment variable is set.
+    //
     // Throws std::invalid_argument if width or height is not positive, if there are
     // more than MAX_SPHERES spheres or MAX_LIGHTS lights, if a sphere radius is not
     // positive, if a light radius is negative, if a mesh has no triangles or an index
@@ -60,7 +77,7 @@ public:
     Renderer(int width, int height, const std::vector<Sphere> &spheres,
         const std::vector<Light> &lights, const Plane &floor = Plane{},
         const std::vector<Mesh> &meshes = {}, const std::vector<Instance> &instances = {},
-        const std::vector<Texture> &textures = {});
+        const std::vector<Texture> &textures = {}, Device device = Device::Auto);
     ~Renderer();
 
     // Owns device memory, so it can be moved but not copied.
@@ -104,7 +121,11 @@ public:
 
     int instance_count() const;
 
-    // GPU time of the last render(), from CUDA events. Excludes the host copy.
+    // The device this Renderer traces on: Cuda or Cpu, never Auto.
+    Device device() const;
+
+    // Time of the last render(): from CUDA events on the GPU, excluding the copy back to the
+    // host, and wall-clock time on the CPU.
     float last_kernel_ms() const;
 
     int width() const;

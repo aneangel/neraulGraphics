@@ -52,12 +52,13 @@ class MuJoCoRenderer(SimRenderer):
         geom_groups: Which geom groups to draw. Defaults to 0, 1 and 2, as MuJoCo's viewer does.
         lights: Lights to use. By default a key and a fill light are placed from the scene's size.
         ambient: Light that reaches every surface regardless of the lights, as a fraction of its colour.
+        device: "auto" (a GPU if there is one, else the CPU), "cuda" or "cpu".
         fov: Vertical field of view of the default camera, in radians.
     """
 
     def __init__(self, model: mujoco.MjModel, width: int = 1280, height: int = 720, *,
                  geom_groups: Collection[int] = (0, 1, 2), lights: Sequence[Light] | None = None,
-                 fov: float = 1.0, ambient: float = 0.2) -> None:
+                 fov: float = 1.0, ambient: float = 0.2, device: str = "auto") -> None:
         builder = SceneBuilder()
         keep: list[int] = []
         scales: list[np.ndarray] = []
@@ -100,7 +101,7 @@ class MuJoCoRenderer(SimRenderer):
         solid = reach > 0
         center, extent = scene_bounds(position[solid], reach[solid])
         super().__init__(width, height, builder, up=(0.0, 0.0, 1.0), center=center, extent=extent, lights=lights,
-                         fov=fov, ambient=ambient)
+                         fov=fov, ambient=ambient, device=device)
         self._place(probe)
 
     @staticmethod

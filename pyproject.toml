@@ -6,23 +6,32 @@ build-backend = "scikit_build_core.build"
 name = "neraulgraphics"
 # Read from project(VERSION) in CMakeLists.txt; see [tool.scikit-build.metadata.version].
 dynamic = ["version"]
-description = "A CUDA raytracer you can call from Python or C++"
+description = "A raytracing rendering engine for games and simulation: GPU (CUDA) or CPU, from Python or C++"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "Anthony Angeles" }]
 dependencies = ["numpy>=1.22"]
+keywords = ["raytracing", "rendering", "graphics", "cuda", "simulation", "robotics", "mujoco", "newton", "gltf"]
 classifiers = [
+    "Development Status :: 3 - Alpha",
     "Environment :: GPU :: NVIDIA CUDA",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: C++",
     "Programming Language :: Python :: 3",
     "Topic :: Multimedia :: Graphics :: 3D Rendering",
+    "Topic :: Scientific/Engineering :: Visualization",
 ]
 
 [project.urls]
 Repository = "https://github.com/aneangel/neraulGraphics"
+Changelog = "https://github.com/aneangel/neraulGraphics/blob/main/CHANGELOG.md"
+Issues = "https://github.com/aneangel/neraulGraphics/issues"
 
 [project.optional-dependencies]
 test = ["pytest>=7"]
@@ -57,20 +66,32 @@ testpaths = ["tests"]
 
 # Release wheels. The same settings run locally (cibuildwheel --platform linux,
 # with Docker) and in .github/workflows/release.yml.
+#
+# Linux x86_64 wheels carry the CUDA backend and fall back to the CPU on a machine with no GPU.
+# macOS, Windows and Linux aarch64 wheels are CPU-only: they are built where there is no CUDA, and
+# the build detects that on its own.
 [tool.cibuildwheel]
 # cp312 is built for the stable ABI, so it also covers 3.13 and later.
 build = ["cp310-*", "cp311-*", "cp312-*"]
 skip = ["*-musllinux_*"]
-archs = ["x86_64"]
 manylinux-x86_64-image = "manylinux_2_28"
+manylinux-aarch64-image = "manylinux_2_28"
 build-verbosity = 1
-# Build machines have no GPU, so the rendering tests skip there and only the
-# import, version and conversion tests run. Run the full suite on a GPU machine.
-test-requires = ["pytest"]
-test-sources = ["tests/test_python.py"]
-test-command = "pytest tests/test_python.py"
+# Build machines have no GPU, so the tests run on the CPU backend: every rendering test runs for
+# real, just not on the GPU. Run the suite on a GPU machine too, to test the CUDA backend.
+test-requires = ["pytest", "pillow"]
+test-sources = ["tests/test_python.py", "tests/test_shapes.py", "tests/test_loaders.py"]
+test-command = "pytest tests/test_python.py tests/test_shapes.py tests/test_loaders.py"
+
+[tool.cibuildwheel.macos]
+archs = ["arm64"]
+
+[tool.cibuildwheel.windows]
+archs = ["AMD64"]
 
 [tool.cibuildwheel.linux]
+# aarch64 is built by its own job on an Arm runner (CIBW_ARCHS_LINUX), not emulated here.
+archs = ["x86_64"]
 # nvcc and the static CUDA runtime, from NVIDIA's repository for RHEL 8, which
 # the manylinux_2_28 image is built on.
 before-all = [
@@ -83,3 +104,10 @@ before-all = [
 environment = { PATH = "/usr/local/cuda/bin:$PATH", CUDACXX = "/usr/local/cuda/bin/nvcc", CMAKE_ARGS = "-DCMAKE_CUDA_ARCHITECTURES=75;80;86;89;90;100;120" }
 # libcuda.so.1 is the NVIDIA driver. It must come from the user's machine, never the wheel.
 repair-wheel-command = "auditwheel repair --exclude libcuda.so.1 -w {dest_dir} {wheel}"
+
+# NVIDIA publishes no CUDA for Arm in this image, and Arm machines worth targeting (Raspberry Pi,
+# servers) do not need it: build these wheels CPU-only.
+[[tool.cibuildwheel.overrides]]
+select = "*-manylinux_aarch64"
+before-all = ""
+environment = { CMAKE_ARGS = "-DNERAULGRAPHICS_CUDA=OFF" }

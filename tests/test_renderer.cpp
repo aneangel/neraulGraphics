@@ -652,6 +652,58 @@ int main() {
     }
 
 
+
+    std::puts("devices");
+    {
+        // The CPU backend runs the same rendering code as the GPU kernel, so the two should draw
+        // the same picture. A scene with every feature at once, rendered on each and compared.
+        const Material mat = make_material({0.7f, 0.5f, 0.3f}, 0.9f, 0.4f, 0.0f, 60.0f);
+        const Material textured = make_material({1, 1, 1}, 0.9f, 0.2f, 0.0f, 30.0f);
+        Mesh smooth = make_icosphere(1.0f, 3);
+        for (const Vec3 &v : smooth.vertices) smooth.normals.push_back(v);
+        Mesh quad = make_quad(1.5f, 2.0f);
+        const Texture tex = solid_2x2({{{255, 40, 40}, {40, 255, 40}, {40, 40, 255}, {240, 240, 60}}});
+        std::vector<Light> lights = {{{-20, 20, 20}, 1.5f, 0.0f}, {{30, 50, 30}, 1.7f, 2.0f}};  // one soft: random shadow rays
+        const std::vector<Instance> instances = {
+            {0, make_transform({4, 0.5f, -12}, {0.1f, 0.3f, 0, 1}, 2.0f), mat},
+            {1, make_transform({-4, 0, 0}, {0, 0.4f, 0, 1}), textured, 0}};
+
+        auto build = [&](const Device d) {
+            Renderer r(W, H, s.spheres, lights, s.floor, {smooth, quad}, instances, {tex}, d);
+            r.set_ambient(0.15f);
+            return r;
+        };
+        Renderer cpu = build(Device::Cpu);
+        check(cpu.device() == Device::Cpu, "Device::Cpu gives a CPU renderer");
+
+        bool have_gpu = true;
+        try { Renderer probe(8, 8, {}, {}, Plane{}, {}, {}, {}, Device::Cuda); } catch (const CudaError &) { have_gpu = false; }
+        if (have_gpu) {
+            Renderer gpu = build(Device::Cuda);
+            check(gpu.device() == Device::Cuda, "Device::Cuda gives a GPU renderer");
+            const Image a = frame(gpu), b = frame(cpu);
+            const Diff d = compare(a, b);
+            std::printf("  GPU vs CPU, every feature at once: mean error %.3f, %.3f%% of pixels visibly off\n", d.mean, d.bad_fraction * 100.0);
+            check(d.mean < 0.5 && d.bad_fraction < 0.005, "the CPU and the GPU draw the same picture");
+
+            // And they stay together as the scene moves and the image accumulates.
+            const std::vector<Transform> moved = {make_transform({3, 1, -11}, {0, 0.2f, 0, 1}, 2.0f), make_transform({-3, 0, 0.5f})};
+            gpu.set_instance_transforms(moved);
+            cpu.set_instance_transforms(moved);
+            Image ga, ca;
+            for (int f = 0; f < 6; ++f) { ga = frame(gpu, f); ca = frame(cpu, f); }
+            const Diff after = compare(ga, ca);
+            std::printf("  after moving instances and 6 accumulated frames: mean error %.3f\n", after.mean);
+            check(after.mean < 0.5 && after.bad_fraction < 0.005, "they still agree after instances move and samples accumulate");
+        } else {
+            std::puts("  (no CUDA device: skipping the comparison with the GPU)");
+        }
+
+        // The CPU renderer alone: the same scene gives the same picture, however the threads share the rows.
+        Renderer first = build(Device::Cpu), second = build(Device::Cpu);
+        check(frame(first, 0) == frame(second, 0), "the CPU renders deterministically");
+    }
+
     std::puts("ambient light");
     {
         // A sphere lit only from behind: the face the camera sees gets no direct light at all.

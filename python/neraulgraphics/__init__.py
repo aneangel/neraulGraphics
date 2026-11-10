@@ -24,7 +24,8 @@ over them, so a simulation can move thousands of bodies per frame::
     renderer = ng.Renderer(800, 450, [], lights, meshes=[ball], instances=bodies)
     renderer.set_instance_transforms(matrices)  # (N, 3, 4) float array, every frame
 
-Needs an NVIDIA GPU and driver. Errors in the scene raise ValueError; a failure
+It traces on an NVIDIA GPU when there is one and on the CPU otherwise (``device="cpu"``
+forces the CPU), drawing the same picture either way. Errors in the scene raise ValueError; a failure
 inside CUDA raises neraulgraphics.CudaError.
 """
 
@@ -44,6 +45,7 @@ from ._core import (
     Texture,
     Transform,
     __version__,
+    cuda_available,
     identity_transform,
     make_box,
     make_camera,
@@ -71,6 +73,7 @@ __all__ = [
     "Texture",
     "Transform",
     "__version__",
+    "cuda_available",
     "identity_transform",
     "make_box",
     "make_camera",

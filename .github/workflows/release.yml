@@ -1,8 +1,12 @@
 name: release
 
-# Pushing a tag vX.Y.Z builds the source archive and Linux wheels, then publishes
-# them as the GitHub Release for that tag. Running it by hand (Actions > release >
-# Run workflow) builds the same files without publishing, as a dry run.
+# Pushing a tag vX.Y.Z builds the source archive and wheels, then publishes them as the
+# GitHub Release for that tag, and to PyPI if that has been switched on (see RELEASING.md).
+# Running it by hand (Actions > release > Run workflow) builds the same files without
+# publishing anything, as a dry run.
+#
+# Wheels: Linux x86_64 carries the CUDA backend (and uses the CPU on a machine with no GPU);
+# macOS, Windows and Linux aarch64 are CPU-only.
 #
 # See RELEASING.md for the steps around it.
 
@@ -54,6 +58,7 @@ jobs:
           path: dist/*.tar.gz
 
   # Settings live in [tool.cibuildwheel] in pyproject.toml, shared with local builds.
+  # Linux x86_64, with the CUDA backend.
   wheels:
     needs: check-version
     runs-on: ubuntu-latest
@@ -64,12 +69,35 @@ jobs:
           output-dir: wheelhouse
       - uses: actions/upload-artifact@v7
         with:
-          name: wheels
+          name: wheels-linux-cuda
+          path: wheelhouse/*.whl
+
+  # Everything without CUDA: the build finds no CUDA compiler and builds the CPU backend only.
+  wheels-cpu:
+    needs: check-version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: macos-arm64, os: macos-latest }
+          - { name: windows-amd64, os: windows-latest }
+          - { name: linux-aarch64, os: ubuntu-24.04-arm, archs: aarch64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pypa/cibuildwheel@v4.3.5
+        env:
+          CIBW_ARCHS_LINUX: ${{ matrix.archs }}
+        with:
+          output-dir: wheelhouse
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheels-${{ matrix.name }}
           path: wheelhouse/*.whl
 
   publish:
     if: github.ref_type == 'tag'
-    needs: [check-version, sdist, wheels]
+    needs: [check-version, sdist, wheels, wheels-cpu]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -95,3 +123,19 @@ jobs:
           gh release create "$GITHUB_REF_NAME" dist/* \
             --title "neraulgraphics $VERSION" \
             --notes-file notes.md
+
+  # PyPI, by trusted publishing: no token is stored here. It does nothing until the repository
+  # variable PUBLISH_TO_PYPI is set to true, after the one-time setup on pypi.org in RELEASING.md.
+  pypi:
+    if: github.ref_type == 'tag' && vars.PUBLISH_TO_PYPI == 'true'
+    needs: [check-version, sdist, wheels, wheels-cpu, publish]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1

@@ -76,9 +76,16 @@ struct PyRenderer {
 
     PyRenderer(const int width, const int height, const std::vector<Sphere> &spheres,
         const std::vector<Light> &lights, const Plane &floor, const std::vector<Mesh> &meshes,
-        const std::vector<Instance> &instances, const std::vector<Texture> &textures)
-        : renderer(width, height, spheres, lights, floor, meshes, instances, textures) {}
+        const std::vector<Instance> &instances, const std::vector<Texture> &textures, const Device device)
+        : renderer(width, height, spheres, lights, floor, meshes, instances, textures, device) {}
 };
+
+Device parse_device(const std::string &name) {
+    if (name == "auto") return Device::Auto;
+    if (name == "cuda") return Device::Cuda;
+    if (name == "cpu") return Device::Cpu;
+    throw std::invalid_argument("device must be 'auto', 'cuda' or 'cpu', got '" + name + "'");
+}
 
 // Arrays arrive as C-contiguous float32 or uint32 (anything else is converted),
 // which is what lets the C++ side read them with no per-element Python calls.
@@ -206,6 +213,10 @@ NB_MODULE(_core, m) {
     m.attr("MAX_LIGHTS") = MAX_LIGHTS;
 
     nb::exception<CudaError>(m, "CudaError", PyExc_RuntimeError);
+
+    m.def("cuda_available", &cuda_available,
+        "True if a GPU is usable, so device='auto' would use it. The environment variable "
+        "NERAULGRAPHICS_DEVICE=cpu (or cuda) overrides what 'auto' chooses.");
 
     nb::class_<Material>(m, "Material", "How a surface reflects light.")
         .def("__init__",
@@ -387,11 +398,22 @@ NB_MODULE(_core, m) {
 
     nb::class_<PyRenderer>(m, "Renderer",
         "One scene and its frame buffers on the GPU. Safe to share between threads.")
-        .def(nb::init<int, int, const std::vector<Sphere> &, const std::vector<Light> &, const Plane &,
-                 const std::vector<Mesh> &, const std::vector<Instance> &, const std::vector<Texture> &>(),
+        .def("__init__",
+            [](PyRenderer *self, const int width, const int height, const std::vector<Sphere> &spheres,
+                const std::vector<Light> &lights, const Plane &floor, const std::vector<Mesh> &meshes,
+                const std::vector<Instance> &instances, const std::vector<Texture> &textures,
+                const std::string &device) {
+                new (self) PyRenderer(width, height, spheres, lights, floor, meshes, instances, textures,
+                    parse_device(device));
+            },
             "width"_a, "height"_a, "spheres"_a, "lights"_a, "floor"_a = Plane{},
             "meshes"_a = std::vector<Mesh>{}, "instances"_a = std::vector<Instance>{},
-            "textures"_a = std::vector<Texture>{})
+            "textures"_a = std::vector<Texture>{}, "device"_a = "auto",
+            "device: where to trace. 'auto' (the default) uses an NVIDIA GPU if there is one and "
+            "the CPU otherwise; 'cuda' requires a GPU and raises CudaError without one; 'cpu' "
+            "always uses the CPU. The picture is the same either way.")
+        .def_prop_ro("device", [](PyRenderer &self) { return self.renderer.device() == Device::Cuda ? "cuda" : "cpu"; },
+            "'cuda' or 'cpu': where this renderer is tracing.")
         .def("set_instance_transforms", &set_instance_transforms, "transforms"_a,
             "Move the instances: an (N, 3, 4) float array, one 3x4 matrix per instance in the "
             "order they were given. Only the small BVH over instances is updated, so this is the "
@@ -421,5 +443,5 @@ NB_MODULE(_core, m) {
         .def_prop_ro("last_kernel_ms", [](PyRenderer &self) {
             std::lock_guard<std::mutex> lock(self.mutex);
             return self.renderer.last_kernel_ms();
-        }, "GPU time of the last render, in milliseconds.");
+        }, "Time of the last render, in milliseconds: GPU time on CUDA, wall-clock time on the CPU.");
 }

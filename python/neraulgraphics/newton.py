@@ -90,6 +90,7 @@ class NewtonRenderer(SimRenderer):
         width, height: Image size in pixels.
         lights: Lights to use. By default a key and a fill light are placed from the scene's size.
         ambient: Light that reaches every surface regardless of the lights, as a fraction of its colour.
+        device: "auto" (a GPU if there is one, else the CPU), "cuda" or "cpu".
         world_offsets: Optional ``(world_count, 3)`` offsets, so the worlds of a batched
             simulation sit side by side instead of on top of each other.
         fov: Vertical field of view of the default camera, in radians.
@@ -97,7 +98,7 @@ class NewtonRenderer(SimRenderer):
 
     def __init__(self, model: newton.Model, width: int = 1280, height: int = 720, *,
                  lights: Sequence[Light] | None = None, world_offsets: np.ndarray | None = None,
-                 fov: float = 1.0, ambient: float = 0.2) -> None:
+                 fov: float = 1.0, ambient: float = 0.2, device: str = "auto") -> None:
         shape_type = model.shape_type.numpy()
         shape_scale = model.shape_scale.numpy()
         flags = model.shape_flags.numpy()
@@ -142,7 +143,7 @@ class NewtonRenderer(SimRenderer):
         reach = np.array([builder.radius[m] for m in meshes_used]) * np.abs(self._scale).max(axis=1, initial=0.0)
         center, extent = scene_bounds(matrices[:, :, 3][reach > 0], reach[reach > 0])
         super().__init__(width, height, builder, up=_UP[int(model.up_axis)], center=center, extent=extent,
-                         lights=lights, fov=fov, ambient=ambient)
+                         lights=lights, fov=fov, ambient=ambient, device=device)
         self.renderer.set_instance_transforms(matrices)
 
     def _matrices(self, body_q: np.ndarray | None) -> np.ndarray:

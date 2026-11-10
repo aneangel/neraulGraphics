@@ -1,19 +1,17 @@
-#ifndef GEOM_GPU_CUH
-#define GEOM_GPU_CUH
+#ifndef NERAULGRAPHICS_GEOM_DEV_H
+#define NERAULGRAPHICS_GEOM_DEV_H
 
-// Vector math, RNG, sampling and colour conversion for host and device.
+// Vector math, RNG, sampling and colour conversion, shared by the CUDA and CPU backends
+// (see backend_api.h). Everything is in the backend's own namespace.
 // NOTE: operator*(float3, float3) is component-wise, not a dot product.
 
-#include <cuda_runtime.h>
-#include <cmath>
-#include <cstdint>
+#include "backend_api.h"
 
-// __host__ __device__ under nvcc, plain inline otherwise.
-#ifdef __CUDACC__
-#define GPU_FN __host__ __device__ __forceinline__
-#else
-#define GPU_FN inline
-#endif
+namespace neraulgraphics::NG_NS {
+
+// The scalar versions, so the float3 overloads below do not hide them.
+using ::fmaxf;
+using ::fminf;
 
 // ------------------------------------------------------------------ float3 --
 
@@ -139,9 +137,7 @@ GPU_FN float3 random_unit_vector(RNG &r) {
     const float z = 1.0f - 2.0f * rand_float(r);
     const float rad = sqrtf(fmaxf(0.0f, 1.0f - z * z));
     const float phi = 6.28318530718f * rand_float(r);
-    float s, c;
-    sincosf(phi, &s, &c);
-    return make_float3(rad * c, rad * s, z);
+    return make_float3(rad * cosf(phi), rad * sinf(phi), z);
 }
 
 // Cosine-weighted direction around n, for Lambertian bounces.
@@ -181,4 +177,6 @@ GPU_FN uint32_t pack_argb8888(const float3 &c) {
     return 0xFF000000u | (r << 16) | (g << 8) | b;
 }
 
-#endif  // GEOM_GPU_CUH
+}  // namespace neraulgraphics::NG_NS
+
+#endif  // NERAULGRAPHICS_GEOM_DEV_H

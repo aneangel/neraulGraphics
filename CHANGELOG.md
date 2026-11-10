@@ -9,6 +9,18 @@ version (0.x.0) may change the API.
 ## [Unreleased]
 
 ### Added
+- A CPU backend. The renderer runs on every core of the machine when there is no NVIDIA GPU,
+  drawing the same picture as the GPU (the two run the same rendering code). `Renderer` takes
+  `device="auto" | "cuda" | "cpu"` (C++: `Device`), `Renderer.device` says which was chosen, and
+  `cuda_available()` says whether a GPU is usable. `NERAULGRAPHICS_DEVICE=cpu` overrides `auto`;
+  `NERAULGRAPHICS_THREADS` sets the CPU thread count. A machine with no GPU used to raise
+  `CudaError`; it now falls back to the CPU.
+- CUDA is optional at build time (`-DNERAULGRAPHICS_CUDA=AUTO|ON|OFF`; AUTO uses it if a CUDA
+  compiler is found). Without it the library needs only a C++17 compiler and depends on no CUDA
+  library or driver.
+- Wheels for macOS (Apple Silicon), Windows and Linux aarch64, CPU-only, alongside the Linux x86_64
+  CUDA wheels. The release workflow can publish to PyPI by trusted publishing, once enabled.
+- `docs/portability.md`: what runs where, and how other GPUs could be supported.
 - `neraulgraphics.newton.NewtonRenderer` and `neraulgraphics.mujoco.MuJoCoRenderer`:
   render a Newton or MuJoCo simulation. Shapes become mesh instances once; each
   `render(state)` only moves them. Sphere, box, capsule, cylinder, cone, ellipsoid,
@@ -27,8 +39,13 @@ version (0.x.0) may change the API.
   default to 0.2.
 - Simulator planes draw as a checkerboard ground.
 
+### Changed
+- `make_camera` computes in double precision on the CPU, so a camera is identical on both backends.
+- Python wheel tests now render for real on build machines, on the CPU backend.
+
 ### Known limits
 - Textures are not mip-mapped, so distant fine patterns grain until samples accumulate.
+- The CPU backend is roughly 40 to 100 times slower than a recent GPU (at 1280x720 a 16-core CPU takes 17 to 41 ms for 138k-triangle models).
 - glTF: no animation or skinning (bind pose is drawn), normal maps, transparency or Draco.
 
 ## [0.3.0]

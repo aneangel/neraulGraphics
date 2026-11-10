@@ -1,15 +1,16 @@
-#ifndef NERAULGRAPHICS_DEVICE_SCENE_CUH
-#define NERAULGRAPHICS_DEVICE_SCENE_CUH
+#ifndef NERAULGRAPHICS_DEVICE_SCENE_H
+#define NERAULGRAPHICS_DEVICE_SCENE_H
 
-// Device-side scene types: the public types of scene.h with CUDA's float3 in place
-// of Vec3. Private to the library; render_gpu.cu converts at the boundary. They
+// Device-side scene types: the public types of scene.h with float3 in place of Vec3
+// (CUDA's on the GPU, backend_api.h's on the CPU). Private to the library; the backends convert
+// at the boundary. They
 // share names with the public types so the device code, which sits in this
 // namespace, reads the same as before the split.
 
 #include <neraulgraphics/scene.h>
-#include "geom_gpu.cuh"
+#include "geom_dev.h"
 
-namespace neraulgraphics::device {
+namespace neraulgraphics::NG_NS {
 
 struct Material {
     float3 diffuse_color;
@@ -83,6 +84,6 @@ GPU_FN float3 camera_ray(const Camera &c, const float px, const float py, const 
     return normalize(c.right * sx + c.up * sy + c.forward);
 }
 
-}  // namespace neraulgraphics::device
+}  // namespace neraulgraphics::NG_NS
 
-#endif  // NERAULGRAPHICS_DEVICE_SCENE_CUH
+#endif  // NERAULGRAPHICS_DEVICE_SCENE_H
