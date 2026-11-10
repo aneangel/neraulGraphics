@@ -26,6 +26,8 @@ Repository = "https://github.com/aneangel/neraulGraphics"
 
 [project.optional-dependencies]
 test = ["pytest>=7"]
+mujoco = ["mujoco>=3.0"]
+images = ["pillow"]
 
 [tool.scikit-build]
 minimum-version = "build-system.requires"

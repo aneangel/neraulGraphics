@@ -16,6 +16,7 @@
 !/cmake/**
 !/python/**
 !/tests/**
+!/examples/**
 !/.github/**
 !/pyproject.toml
 !/README.md

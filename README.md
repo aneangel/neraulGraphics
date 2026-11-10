@@ -14,6 +14,7 @@ sharpens the longer the camera holds still.
 - **Library first.** `pip install` and `import neraulgraphics`, or `find_package(neraulgraphics)` in C++. No window or engine to adopt.
 - **Meshes and instancing.** Share triangle meshes between any number of instances. Moving an instance only updates a small BVH, so thousands of moving bodies stay cheap.
 - **Dynamic scenes.** `set_instance_transforms()` takes a pose per instance each frame, with poses as position plus `(x, y, z, w)` quaternion, the convention Warp, MuJoCo and Newton use.
+- **Newton and MuJoCo adapters.** `NewtonRenderer(model).render(state)` and `MuJoCoRenderer(model).render(data)`: shapes become instances once, and each frame only poses are updated.
 - **Reflections, soft shadows, anti-aliasing**, plus progressive refinement while the camera is still.
 - **Interactive viewer** with free-fly camera: `make raytracer`.
 - **Clear errors.** Bad scenes raise `ValueError` (Python) or `std::invalid_argument` (C++) saying what is wrong, instead of crashing.
@@ -51,6 +52,23 @@ for frame in range(64):                  # more frames, smoother image
 
 Move things every frame with `renderer.set_instance_transforms(matrices)`, an
 `(N, 3, 4)` float array, then render with `frame=0`.
+
+## Rendering a simulation
+
+```python
+from neraulgraphics.newton import NewtonRenderer          # or neraulgraphics.mujoco.MuJoCoRenderer
+
+view = NewtonRenderer(model, 1280, 720)                   # shapes become mesh instances, once
+for _ in range(steps):
+    solver.step(state_0, state_1, control, contacts, dt)
+    image = view.render(state_1)                          # (720, 1280, 3) uint8; only poses are read
+```
+
+It draws spheres, boxes, capsules, cylinders, cones, ellipsoids, planes and meshes, with the
+colours the model gives them, and frames the scene and lights it for you. Pass your own
+`camera=` (from `view.camera(position, target)`) or `lights=` to take control. A real
+articulated humanoid renders in under a millisecond a frame. Runnable versions are in
+[examples/](examples/).
 
 C++:
 

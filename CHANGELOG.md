@@ -6,6 +6,17 @@ without one, and uses the section as the release notes.
 Versions follow [semantic versioning](https://semver.org). Before 1.0, a minor
 version (0.x.0) may change the API.
 
+## [Unreleased]
+
+### Added
+- `neraulgraphics.newton.NewtonRenderer` and `neraulgraphics.mujoco.MuJoCoRenderer`:
+  render a Newton or MuJoCo simulation. Shapes become mesh instances once; each
+  `render(state)` only moves them. Sphere, box, capsule, cylinder, cone, ellipsoid,
+  plane and mesh shapes, with colours from the model.
+- `neraulgraphics.shapes`: capsule, cylinder, cone, plane and sphere generators, and the
+  pose math (`pose_matrices`, `compose_poses`) the adapters use.
+- `examples/` with a Newton and a MuJoCo script, and `mujoco` and `images` extras.
+
 ## [0.3.0]
 
 Triangle meshes and dynamic scenes.
