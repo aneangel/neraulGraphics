@@ -1,13 +1,14 @@
-#ifndef RENDER_GPU_H
-#define RENDER_GPU_H
+#ifndef NERAULGRAPHICS_RENDERER_H
+#define NERAULGRAPHICS_RENDERER_H
 
-// Host-side interface to the CUDA renderer. Callers never see a kernel launch.
+// Host-side interface to the CUDA renderer. Callers never see a kernel launch,
+// and this header pulls in no CUDA headers.
 //
 // Failures are reported as exceptions, never by exiting, so the program using
 // the renderer decides what an error means:
-//   std::invalid_argument  bad input, rejected before anything reaches the device
-//   std::logic_error       a call on a moved-from Renderer
-//   gpu::CudaError         the CUDA runtime refused or failed a call
+//   std::invalid_argument      bad input, rejected before anything reaches the device
+//   std::logic_error           a call on a moved-from Renderer
+//   neraulgraphics::CudaError  the CUDA runtime refused or failed a call
 // Every check runs before any state changes, so a rejected call leaves the
 // Renderer exactly as it was.
 
@@ -16,9 +17,12 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
-#include "scene.h"
+// Through the package prefix, not "": version.h is generated into the build tree,
+// so it sits beside this header only once installed.
+#include <neraulgraphics/scene.h>
+#include <neraulgraphics/version.h>
 
-namespace gpu {
+namespace neraulgraphics {
 
 // A failed CUDA call. code() is the cudaError_t value. A fault inside a kernel is
 // sticky: the CUDA context stays broken, so every later CUDA call fails too.
@@ -36,13 +40,13 @@ private:
 // Impl, which keeps CUDA handles out of this header.
 class Renderer {
 public:
-    // Copies the scene and allocates the frame buffers.
+    // Copies the scene and allocates the frame buffers. The default floor is no floor.
     //
     // Throws std::invalid_argument if width or height is not positive, if there are
     // more than MAX_SPHERES spheres or MAX_LIGHTS lights, if a sphere radius is not
     // positive, if a light radius is negative, or if any value is NaN or infinite.
     Renderer(int width, int height, const std::vector<Sphere> &spheres,
-        const std::vector<Light> &lights, const Plane &floor);
+        const std::vector<Light> &lights, const Plane &floor = Plane{});
     ~Renderer();
 
     // Owns device memory, so it can be moved but not copied.
@@ -51,8 +55,9 @@ public:
     Renderer(const Renderer &) = delete;
     Renderer &operator=(const Renderer &) = delete;
 
-    // Traces one frame. Returns width*height packed ARGB8888 pixels in pinned host
-    // memory, valid until the next render() on this instance.
+    // Traces one frame. Returns width*height pixels in pinned host memory, valid
+    // until the next render() on this instance. Rows run top to bottom; each pixel
+    // is 0xAARRGGBB (SDL_PIXELFORMAT_ARGB8888), gamma-encoded, alpha always 0xFF.
     //
     // frame: accumulation index. Pass 0 to restart (the camera moved), then increment
     //        while it holds still and samples will keep averaging in. Must be >= 0.
@@ -78,6 +83,6 @@ private:
     const Impl &state() const;
 };
 
-}  // namespace gpu
+}  // namespace neraulgraphics
 
-#endif  // RENDER_GPU_H
+#endif  // NERAULGRAPHICS_RENDERER_H

@@ -7,12 +7,27 @@
 #include <string>
 #include <vector>
 #include <SDL2/SDL.h>
-#include <raytracer/render_gpu.h>
-#include <raytracer/scene.h>
+#include <neraulgraphics/renderer.h>
+
+using namespace neraulgraphics;
 
 namespace {
-    float3 forward_from_angles(const float yaw, const float pitch) {
-        return make_float3(cosf(pitch) * sinf(yaw), sinf(pitch), -cosf(pitch) * cosf(yaw));
+    // The library's public Vec3 is plain data, so the viewer keeps the little
+    // vector math its camera controls need.
+    Vec3 operator+(const Vec3 &a, const Vec3 &b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
+    Vec3 operator-(const Vec3 &a, const Vec3 &b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
+    Vec3 operator*(const Vec3 &v, const float s) { return {v.x * s, v.y * s, v.z * s}; }
+    Vec3 &operator+=(Vec3 &a, const Vec3 &b) { return a = a + b; }
+    Vec3 &operator-=(Vec3 &a, const Vec3 &b) { return a = a - b; }
+
+    Vec3 cross(const Vec3 &a, const Vec3 &b) {
+        return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+    }
+
+    Vec3 normalize(const Vec3 &v) { return v * (1.0f / std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z)); }
+
+    Vec3 forward_from_angles(const float yaw, const float pitch) {
+        return {cosf(pitch) * sinf(yaw), sinf(pitch), -cosf(pitch) * cosf(yaw)};
     }
 
     void save_ppm(const uint32_t *pixels, const int width, const int height, const std::string &filename) {
@@ -34,27 +49,27 @@ int run() {
     constexpr float fov = M_PI / 2;
     // Rays per pixel each frame. Raise to anti-alias while the camera is moving.
     constexpr int samples_per_frame = 1;
-    const float3 world_up = make_float3(0, 1, 0);
+    const Vec3 world_up = Vec3{0, 1, 0};
 
     // colour, diffuse albedo, specular albedo, reflectivity, specular exponent
-    const Material ivory = make_material(make_float3(0.4f, 0.4f, 0.3f), 0.6f, 0.3f, 0.1f, 50.0f);
-    const Material red_rubber = make_material(make_float3(0.3f, 0.1f, 0.1f), 0.9f, 0.1f, 0.0f, 10.0f);
-    const Material mirror = make_material(make_float3(1.0f, 1.0f, 1.0f), 0.0f, 10.0f, 0.8f, 1425.0f);
-    const Material purple = make_material(make_float3(2.0, 1.0, 4.0), 0.6, 0.3, 0.1, 50.0f);
+    const Material ivory = make_material(Vec3{0.4f, 0.4f, 0.3f}, 0.6f, 0.3f, 0.1f, 50.0f);
+    const Material red_rubber = make_material(Vec3{0.3f, 0.1f, 0.1f}, 0.9f, 0.1f, 0.0f, 10.0f);
+    const Material mirror = make_material(Vec3{1.0f, 1.0f, 1.0f}, 0.0f, 10.0f, 0.8f, 1425.0f);
+    const Material purple = make_material(Vec3{2.0, 1.0, 4.0}, 0.6, 0.3, 0.1, 50.0f);
 
     std::vector<Sphere> spheres = {
-        {make_float3(-3.0f, 0.0f, -16.0f), 2.0f, ivory},
-        {make_float3(-1.0f, -1.5f, -12.0f), 2.0f, mirror},
-        {make_float3(1.5f, -0.5f, -18.0f), 3.0f, red_rubber},
-        {make_float3(7.0f, 5.0f, -18.0f), 4.0f, mirror},
-        {make_float3(0.4, 0.5, -25.0f), 3.0f, purple},
+        {Vec3{-3.0f, 0.0f, -16.0f}, 2.0f, ivory},
+        {Vec3{-1.0f, -1.5f, -12.0f}, 2.0f, mirror},
+        {Vec3{1.5f, -0.5f, -18.0f}, 3.0f, red_rubber},
+        {Vec3{7.0f, 5.0f, -18.0f}, 4.0f, mirror},
+        {Vec3{0.4, 0.5, -25.0f}, 3.0f, purple},
     };
 
     // Last field is the light's radius: 0 gives hard shadows, above 0 gives soft ones.
     std::vector<Light> lights = {
-        {make_float3(-20.0f, 20.0f, 20.0f), 1.5f, 0.0f},
-        {make_float3(30.0f, 50.0f, -25.0f), 1.8f, 0.0f},
-        {make_float3(30.0f, 50.0f, 30.0f), 1.7f, 0.0f},
+        {Vec3{-20.0f, 20.0f, 20.0f}, 1.5f, 0.0f},
+        {Vec3{30.0f, 50.0f, -25.0f}, 1.8f, 0.0f},
+        {Vec3{30.0f, 50.0f, 30.0f}, 1.7f, 0.0f},
     };
 
     Plane floor{};
@@ -63,11 +78,11 @@ int run() {
     floor.z_min = -30.0f;
     floor.z_max = -10.0f;
     floor.checker_scale = 0.5f;
-    floor.material = make_material(make_float3(1.0f, 1.0f, 1.0f), 1.0f, 0.0f, 0.0f, 1.0f);
+    floor.material = make_material(Vec3{1.0f, 1.0f, 1.0f}, 1.0f, 0.0f, 0.0f, 1.0f);
 
     // Built before the window, so a bad scene is reported without one flashing up.
     // Frees its device memory when it goes out of scope.
-    gpu::Renderer gpu_renderer(width, height, spheres, lights, floor);
+    Renderer gpu_renderer(width, height, spheres, lights, floor);
 
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         std::cerr << "SDL_Init: " << SDL_GetError() << "\n";
@@ -82,7 +97,7 @@ int run() {
         SDL_TEXTUREACCESS_STREAMING, width, height);
     SDL_RenderSetLogicalSize(renderer, width, height);
 
-    float3 position = make_float3(0, 0, 0);
+    Vec3 position = Vec3{0, 0, 0};
     float yaw = 0, pitch = 0;
     bool looking = false, running = true;
     int frame = 0;
@@ -97,7 +112,7 @@ int run() {
             static_cast<float>(now - prev) / static_cast<float>(SDL_GetPerformanceFrequency())));
         prev = now;
 
-        const float3 prev_position = position;
+        const Vec3 prev_position = position;
         const float prev_yaw = yaw, prev_pitch = pitch;
 
         SDL_Event event;
@@ -134,8 +149,8 @@ int run() {
 
         const Uint8 *keys = SDL_GetKeyboardState(nullptr);
         const float speed = (keys[SDL_SCANCODE_LSHIFT] ? 24.f : 8.f) * dt;
-        const float3 forward = forward_from_angles(yaw, pitch);
-        const float3 right = normalize(cross(forward, world_up));
+        const Vec3 forward = forward_from_angles(yaw, pitch);
+        const Vec3 right = normalize(cross(forward, world_up));
         if (keys[SDL_SCANCODE_W]) position += forward * speed;
         if (keys[SDL_SCANCODE_S]) position -= forward * speed;
         if (keys[SDL_SCANCODE_A]) position -= right * speed;

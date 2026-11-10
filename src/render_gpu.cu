@@ -2,15 +2,30 @@
 #include <cmath>
 #include <cstdint>
 #include <string>
-#include <raytracer/render_gpu.h>
+#include <neraulgraphics/renderer.h>
+#include "device_scene.cuh"
 
-// Throws gpu::CudaError naming the failed call and where it was made.
+// Throws neraulgraphics::CudaError naming the failed call and where it was made.
 #define CUDA_CHECK(call)                                                                        \
     do {                                                                                        \
         const cudaError_t err_ = (call);                                                        \
         if (err_ != cudaSuccess) throw_cuda_error(err_, #call, __FILE__, __LINE__);             \
     } while (0)
 
+namespace {
+
+[[noreturn]] void throw_cuda_error(const cudaError_t err, const char *call, const char *file,
+    const int line) {
+    throw neraulgraphics::CudaError(static_cast<int>(err), std::string(file) + ":" +
+        std::to_string(line) + ": " + call + " failed: " + cudaGetErrorString(err) + " (" +
+        cudaGetErrorName(err) + ")");
+}
+
+}  // namespace
+
+// Device code. Inside this namespace Sphere, Material and the rest name the float3
+// layouts from device_scene.cuh, not the public types.
+namespace neraulgraphics::device {
 namespace {
 
 constexpr int MAX_DEPTH = 4;
@@ -32,12 +47,6 @@ struct SceneParams {
     int sphere_count;
     int light_count;
 };
-
-[[noreturn]] void throw_cuda_error(const cudaError_t err, const char *call, const char *file,
-    const int line) {
-    throw gpu::CudaError(static_cast<int>(err), std::string(file) + ":" + std::to_string(line) +
-        ": " + call + " failed: " + cudaGetErrorString(err) + " (" + cudaGetErrorName(err) + ")");
-}
 
 struct Hit {
     float3 point;
@@ -206,8 +215,9 @@ __global__ void render_kernel(const __grid_constant__ SceneParams s, float4 *acc
 }
 
 }  // namespace
+}  // namespace neraulgraphics::device
 
-
+namespace neraulgraphics {
 namespace {
 
 // Input checks. They live here rather than in a header because main.cpp is built
@@ -220,7 +230,7 @@ void require(const bool ok, const std::string &message) {
 
 bool finite(const float v) { return std::isfinite(v); }
 
-bool finite(const float3 &v) { return finite(v.x) && finite(v.y) && finite(v.z); }
+bool finite(const Vec3 &v) { return finite(v.x) && finite(v.y) && finite(v.z); }
 
 bool finite(const Material &m) {
     return finite(m.diffuse_color) && finite(m.diffuse_albedo) && finite(m.specular_albedo) &&
@@ -233,7 +243,7 @@ void check_frame_size(const int width, const int height) {
     // The kernel indexes pixels with an int, and a grid is at most 65535 blocks tall.
     require(static_cast<long long>(width) * height <= INT32_MAX,
         "frame of " + std::to_string(width) + "x" + std::to_string(height) + " pixels is too large");
-    require(height <= 65535 * BLOCK_Y, "frame height " + std::to_string(height) + " is too large");
+    require(height <= 65535 * device::BLOCK_Y, "frame height " + std::to_string(height) + " is too large");
 }
 
 void check_scene(const std::vector<Sphere> &spheres, const std::vector<Light> &lights,
@@ -276,7 +286,16 @@ void check_render_args(const Camera &c, const int frame, const int samples_per_f
 
 }  // namespace
 
-namespace gpu {
+Camera make_camera(const Vec3 &position, const Vec3 &target, const Vec3 &world_up, const float fov,
+    const int width, const int height) {
+    const float3 p = device::to_device(position);
+    const float3 forward = normalize(device::to_device(target) - p);
+    const float3 right = normalize(cross(forward, device::to_device(world_up)));
+    const float3 up = cross(right, forward);
+    return Camera{position, device::to_public(right), device::to_public(up),
+        device::to_public(forward), tanf(fov * 0.5f),
+        static_cast<float>(width) / static_cast<float>(height)};
+}
 
 // Device memory and the scene copy for one Renderer.
 struct Renderer::Impl {
@@ -288,7 +307,7 @@ struct Renderer::Impl {
     cudaEvent_t ev_start = nullptr;
     cudaEvent_t ev_stop = nullptr;
     float kernel_ms = 0.0f;
-    SceneParams params{};
+    device::SceneParams params{};
 
     // Destructors must not throw, so CUDA errors here are ignored. After a sticky
     // fault these calls fail anyway, and the process is about to report it.
@@ -312,9 +331,9 @@ Renderer::Renderer(const int width, const int height, const std::vector<Sphere> 
     r->width = width;
     r->height = height;
 
-    std::copy(spheres.begin(), spheres.end(), r->params.spheres);
-    std::copy(lights.begin(), lights.end(), r->params.lights);
-    r->params.floor = floor;
+    for (size_t i = 0; i < spheres.size(); ++i) r->params.spheres[i] = device::to_device(spheres[i]);
+    for (size_t i = 0; i < lights.size(); ++i) r->params.lights[i] = device::to_device(lights[i]);
+    r->params.floor = device::to_device(floor);
     r->params.sphere_count = static_cast<int>(spheres.size());
     r->params.light_count = static_cast<int>(lights.size());
 
@@ -339,12 +358,12 @@ Renderer::Renderer(Renderer &&) noexcept = default;
 Renderer &Renderer::operator=(Renderer &&) noexcept = default;
 
 Renderer::Impl &Renderer::state() {
-    if (!impl_) throw std::logic_error("gpu::Renderer used after being moved from");
+    if (!impl_) throw std::logic_error("neraulgraphics::Renderer used after being moved from");
     return *impl_;
 }
 
 const Renderer::Impl &Renderer::state() const {
-    if (!impl_) throw std::logic_error("gpu::Renderer used after being moved from");
+    if (!impl_) throw std::logic_error("neraulgraphics::Renderer used after being moved from");
     return *impl_;
 }
 
@@ -352,12 +371,14 @@ const uint32_t *Renderer::render(const Camera &camera, const int frame, const in
     Impl &r = state();
     check_render_args(camera, frame, samples_per_frame);
 
+    using device::BLOCK_X;
+    using device::BLOCK_Y;
     const dim3 block(BLOCK_X, BLOCK_Y);
     const dim3 grid((r.width + BLOCK_X - 1) / BLOCK_X, (r.height + BLOCK_Y - 1) / BLOCK_Y);
 
     CUDA_CHECK(cudaEventRecord(r.ev_start));
-    render_kernel<<<grid, block>>>(r.params, r.d_accum, r.d_pixels, r.width, r.height, camera,
-        frame, samples_per_frame);
+    device::render_kernel<<<grid, block>>>(r.params, r.d_accum, r.d_pixels, r.width, r.height,
+        device::to_device(camera), frame, samples_per_frame);
     // Catches a launch that never started. A fault while running surfaces at the copy.
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaEventRecord(r.ev_stop));
@@ -375,4 +396,4 @@ int Renderer::width() const { return state().width; }
 
 int Renderer::height() const { return state().height; }
 
-}  // namespace gpu
+}  // namespace neraulgraphics

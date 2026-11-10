@@ -12,10 +12,20 @@
 !/src/**
 !/include/**
 !/cmake/**
+!/python/**
+!/tests/**
+!/.github/**
+!/pyproject.toml
 !/README.md
+!/CHANGELOG.md
+!/RELEASING.md
 !/docs/**
 
 # Build trees: re-ignored as whole directories so git doesn't walk them at all.
 /build/
-/cmake-build-debug/
+/cmake-build-*/
+/dist/
+/wheelhouse/
 /.idea/
+__pycache__/
+*.egg-info/

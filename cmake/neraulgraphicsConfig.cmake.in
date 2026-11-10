@@ -1,0 +1,12 @@
+# Loaded by find_package(neraulgraphics). Provides the imported target neraulgraphics::core.
+
+@PACKAGE_INIT@
+
+# The headers need nothing from CUDA, but the static library still links the CUDA
+# runtime, so that target has to exist before the targets file refers to it.
+include(CMakeFindDependencyMacro)
+find_dependency(CUDAToolkit)
+
+include("${CMAKE_CURRENT_LIST_DIR}/neraulgraphicsTargets.cmake")
+
+check_required_components(neraulgraphics)

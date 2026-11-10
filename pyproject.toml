@@ -1,0 +1,81 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "nanobind>=2.4"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "neraulgraphics"
+# Read from project(VERSION) in CMakeLists.txt; see [tool.scikit-build.metadata.version].
+dynamic = ["version"]
+description = "A CUDA raytracer you can call from Python or C++"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Anthony Angeles" }]
+dependencies = ["numpy>=1.22"]
+classifiers = [
+    "Environment :: GPU :: NVIDIA CUDA",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: C++",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Graphics :: 3D Rendering",
+]
+
+[project.urls]
+Repository = "https://github.com/aneangel/neraulGraphics"
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+cmake.version = ">=3.28"
+# Kept between builds, so a second pip install only recompiles what changed.
+build-dir = "build/{wheel_tag}"
+wheel.packages = ["python/neraulgraphics"]
+# The module is built for the stable ABI, so on Python 3.12+ one wheel serves
+# every later version. Older Pythons get a wheel of their own.
+wheel.py-api = "cp312"
+
+[tool.scikit-build.cmake.define]
+NERAULGRAPHICS_BUILD_PYTHON = "ON"
+NERAULGRAPHICS_BUILD_VIEWER = "OFF"
+NERAULGRAPHICS_BUILD_TESTS = "OFF"
+NERAULGRAPHICS_INSTALL = "OFF"
+# The runtime baked in: an installed wheel needs only the NVIDIA driver.
+NERAULGRAPHICS_CUDA_RUNTIME = "Static"
+
+[tool.scikit-build.metadata.version]
+provider = "scikit_build_core.metadata.regex"
+input = "CMakeLists.txt"
+regex = 'project\(neraulgraphics VERSION (?P<value>[0-9]+\.[0-9]+\.[0-9]+)'
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+# Release wheels. The same settings run locally (cibuildwheel --platform linux,
+# with Docker) and in .github/workflows/release.yml.
+[tool.cibuildwheel]
+# cp312 is built for the stable ABI, so it also covers 3.13 and later.
+build = ["cp310-*", "cp311-*", "cp312-*"]
+skip = ["*-musllinux_*"]
+archs = ["x86_64"]
+manylinux-x86_64-image = "manylinux_2_28"
+build-verbosity = 1
+# Build machines have no GPU, so the rendering tests skip there and only the
+# import, version and conversion tests run. Run the full suite on a GPU machine.
+test-requires = ["pytest"]
+test-sources = ["tests/test_python.py"]
+test-command = "pytest tests/test_python.py"
+
+[tool.cibuildwheel.linux]
+# nvcc and the static CUDA runtime, from NVIDIA's repository for RHEL 8, which
+# the manylinux_2_28 image is built on.
+before-all = [
+    "dnf install -y dnf-plugins-core",
+    "dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo",
+    "dnf install -y cuda-nvcc-13-0 cuda-cudart-devel-13-0",
+]
+# One wheel for every GPU generation CUDA 13 supports: Turing (75) through
+# Blackwell (100, 120). Each also carries PTX, so later GPUs can JIT-compile it.
+environment = { PATH = "/usr/local/cuda/bin:$PATH", CUDACXX = "/usr/local/cuda/bin/nvcc", CMAKE_ARGS = "-DCMAKE_CUDA_ARCHITECTURES=75;80;86;89;90;100;120" }
+# libcuda.so.1 is the NVIDIA driver. It must come from the user's machine, never the wheel.
+repair-wheel-command = "auditwheel repair --exclude libcuda.so.1 -w {dest_dir} {wheel}"
