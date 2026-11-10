@@ -15,7 +15,21 @@ version (0.x.0) may change the API.
   plane and mesh shapes, with colours from the model.
 - `neraulgraphics.shapes`: capsule, cylinder, cone, plane and sphere generators, and the
   pose math (`pose_matrices`, `compose_poses`) the adapters use.
-- `examples/` with a Newton and a MuJoCo script, and `mujoco` and `images` extras.
+- `examples/` with Newton, MuJoCo and model-viewing scripts, and `mujoco` and `images` extras.
+- Smooth shading and textures. `Mesh` takes optional per-vertex `normals` and `uvs`; a new
+  `Texture` (RGBA8, sRGB, bilinear filtered, repeating) can be put on an `Instance` with its
+  `texture` index, and multiplies into the material's diffuse colour. `Renderer` takes `textures`.
+- `neraulgraphics.load`, `load_gltf` and `load_obj`: glTF 2.0 (`.gltf` and `.glb`) and
+  Wavefront OBJ with materials, colour textures, vertex normals and node transforms, returning a
+  `LoadedScene` whose `.renderer()` frames the model and lights it.
+- `Renderer.ambient` (C++: `set_ambient`): light reaching every surface regardless of the lights,
+  so faces turned from every light are not black. Defaults to 0; the adapters and loaders
+  default to 0.2.
+- Simulator planes draw as a checkerboard ground.
+
+### Known limits
+- Textures are not mip-mapped, so distant fine patterns grain until samples accumulate.
+- glTF: no animation or skinning (bind pose is drawn), normal maps, transparency or Draco.
 
 ## [0.3.0]
 

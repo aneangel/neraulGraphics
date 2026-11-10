@@ -19,12 +19,21 @@ struct BuiltMeshes {
     // each padded to 4 so the kernel reads them as float4. This is the layout
     // Moller-Trumbore wants, and it avoids chasing an index buffer per hit.
     std::vector<float> triangles;
+    // Per triangle, 16 floats, in the same order as `triangles`: three vertices' normals and
+    // uvs as (nx, ny, nz, u) x 3 then (v0, v1, v2, flags). flags is an int stored in the last
+    // float's bits: ATTR_NORMALS and ATTR_UVS say which of the two the triangle has. Empty if
+    // no mesh has either, so a scene without them pays nothing.
+    std::vector<float> attributes;
     std::vector<int> roots;           // per mesh: index of its root in nodes
     std::vector<bvh::Aabb> bounds;    // per mesh: bounds in the mesh's own space
 };
 
+constexpr int ATTR_NORMALS = 1;
+constexpr int ATTR_UVS = 2;
+
 // Throws std::invalid_argument naming the offending mesh, instance or index.
-void check_meshes(const std::vector<Mesh> &meshes, const std::vector<Instance> &instances);
+void check_meshes(const std::vector<Mesh> &meshes, const std::vector<Instance> &instances,
+    const std::vector<Texture> &textures);
 void check_transform(const Transform &t, const std::string &name);
 
 // Meshes must already have passed check_meshes.

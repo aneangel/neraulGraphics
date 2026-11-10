@@ -3,6 +3,7 @@
 // the failure count, so ctest reports a failure.
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -61,6 +62,7 @@ Scene make_scene() {
 }
 
 Camera camera() { return make_camera({0, 0, 0}, {0, 0, -16}, {0, 1, 0}, 1.5708f, W, H); }
+Camera camera_at_origin() { return make_camera({0, 0, 0}, {0, 0, -5}, {0, 1, 0}, 1.5708f, W, H); }
 
 // Frames 0..frames-1 accumulated, returning the final image.
 std::vector<uint32_t> accumulate(Renderer &r, const int frames) {
@@ -81,10 +83,13 @@ struct Diff {
     double bad_fraction;
 };
 
-Diff compare(const Image &a, const Image &b) {
+Diff compare(const Image &a, const Image &b, const int x0 = 0, const int y0 = 0, const int x1 = W, const int y1 = H) {
     double total = 0.0;
-    size_t bad = 0;
+    size_t bad = 0, count = 0;
     for (size_t i = 0; i < a.size(); ++i) {
+        const int x = static_cast<int>(i) % W, y = static_cast<int>(i) / W;
+        if (x < x0 || x >= x1 || y < y0 || y >= y1) continue;
+        ++count;
         int worst = 0;
         for (int shift = 0; shift <= 16; shift += 8) {
             const int d = std::abs(static_cast<int>((a[i] >> shift) & 0xFF) - static_cast<int>((b[i] >> shift) & 0xFF));
@@ -93,7 +98,7 @@ Diff compare(const Image &a, const Image &b) {
         }
         if (worst > 24) ++bad;
     }
-    return {total / (3.0 * static_cast<double>(a.size())), static_cast<double>(bad) / static_cast<double>(a.size())};
+    return {total / (3.0 * static_cast<double>(count)), static_cast<double>(bad) / static_cast<double>(count)};
 }
 
 Image frame(Renderer &r, const int index = 0) {
@@ -168,6 +173,46 @@ bool bvh_is_valid(const bvh::Bvh &tree, const std::vector<bvh::Aabb> &bounds, co
     return true;
 }
 
+
+// ---------------------------------------------------- normals and textures --
+
+// A square facing the camera at z = -5, from -half to +half, with uvs 0..uv_max (origin
+// at the image's top left, so the top-left corner of the quad is uv (0, 0)).
+Mesh make_quad(const float half, const float uv_max) {
+    Mesh m;
+    m.vertices = {{-half, -half, -5}, {half, -half, -5}, {half, half, -5}, {-half, half, -5}};
+    m.uvs = {{0, uv_max}, {uv_max, uv_max}, {uv_max, 0}, {0, 0}};
+    m.indices = {0, 1, 2, 0, 2, 3};
+    return m;
+}
+
+Texture solid_2x2(const std::array<std::array<uint8_t, 3>, 4> &colors) {  // row 0: [0] [1], row 1: [2] [3]
+    Texture t;
+    t.width = t.height = 2;
+    for (const auto &c : colors) t.rgba.insert(t.rgba.end(), {c[0], c[1], c[2], 255});
+    return t;
+}
+
+uint32_t pixel_at(const uint32_t *p, const int x, const int y) { return p[y * W + x]; }
+// A quad at distance 5 seen by a 90 degree camera: how many pixels one world unit covers.
+// Probes are placed in units, so they stay right if the test image size changes.
+constexpr double PX_PER_UNIT = (W / 2.0) / (5.0 * (static_cast<double>(W) / H));
+int px(const double units) { return static_cast<int>(std::lround(units * PX_PER_UNIT)); }
+int channel(const uint32_t px, const int shift) { return static_cast<int>((px >> shift) & 0xFF); }
+// Which of red, green, blue clearly dominates, or 'w' when none does.
+char dominant(const uint32_t px) {
+    const int r = channel(px, 16), g = channel(px, 8), b = channel(px, 0);
+    if (r > g + 40 && r > b + 40) return 'r';
+    if (g > r + 40 && g > b + 40) return 'g';
+    if (b > r + 40 && b > g + 40) return 'b';
+    return 'w';
+}
+
+// A lit scene for texture tests: one light by the camera, no floor, no spheres.
+Renderer textured_scene(const Mesh &mesh, const Texture &tex, const float albedo = 0.5f) {
+    const Material white = make_material({1, 1, 1}, albedo, 0.0f, 0.0f, 1.0f);
+    return Renderer(W, H, {}, {{{0, 0, 2}, 1.0f, 0.0f}}, Plane{}, {mesh}, {{0, identity_transform(), white, 0}}, {tex});
+}
 }  // namespace
 
 int main() {
@@ -489,6 +534,148 @@ int main() {
         }
         std::printf("  14 steps (drifts and teleports), worst mean error vs rebuilt-from-scratch: %.4f\n", worst);
         check(mismatches == 0, "every step matches a renderer built from scratch at those positions");
+    }
+
+
+    std::puts("smooth shading");
+    {
+        // A faceted sphere shaded with its vertex normals should look rounder than shaded flat,
+        // measured against the analytic sphere it approximates.
+        const Material mat = make_material({0.7f, 0.3f, 0.2f}, 0.9f, 0.3f, 0.0f, 60.0f);
+        const Vec3 where = {4.0f, 0.5f, -12.0f};
+        auto with_sphere = s.spheres;
+        with_sphere.push_back({where, 2.0f, mat});
+        Renderer analytic(W, H, with_sphere, s.lights, s.floor);
+        const Image want = frame(analytic);
+
+        // 1280 triangles. A coarser sphere has a visibly polygonal outline that no normal can fix,
+        // which hides the shading effect (80 triangles: error 8.5 flat vs 5.7 smooth; 1280: 1.7 vs 0.4).
+        Mesh flat = make_icosphere(1.0f, 3);
+        Mesh smooth = flat;
+        for (const Vec3 &v : flat.vertices) smooth.normals.push_back(v);  // a unit sphere's normal is its position
+        const Transform t = make_transform(where, {0, 0, 0, 1}, 2.0f);
+        Renderer r_flat(W, H, s.spheres, s.lights, s.floor, {flat}, {{0, t, mat}});
+        Renderer r_smooth(W, H, s.spheres, s.lights, s.floor, {smooth}, {{0, t, mat}});
+        // Measured over the sphere (centred near pixel (190, 86), about 15 px across), where the
+        // difference is, not diluted by the rest of the image.
+        const double e_flat = compare(frame(r_flat), want, 170, 66, 210, 106).mean;
+        const double e_smooth = compare(frame(r_smooth), want, 170, 66, 210, 106).mean;
+        std::printf("  1280-triangle sphere vs analytic, around the sphere: flat error %.2f, smooth error %.2f\n", e_flat, e_smooth);
+        check(e_smooth < 0.4 * e_flat, "vertex normals make a faceted sphere shade like a smooth one");
+    }
+
+    std::puts("textures");
+    {
+        const std::array<uint8_t, 3> red = {255, 0, 0}, green = {0, 255, 0}, blue = {0, 0, 255}, white = {255, 255, 255};
+        Renderer r = textured_scene(make_quad(3.0f, 1.0f), solid_2x2({red, green, blue, white}));
+        const uint32_t *p = r.render(camera_at_origin(), 0, 1);
+        // The quad spans +-3, so each quadrant's centre is 1.5 units from the middle.
+        const int cx = W / 2, cy = H / 2, d = px(1.5);
+        const std::string got = {dominant(pixel_at(p, cx - d, cy - d)), dominant(pixel_at(p, cx + d, cy - d)),
+            dominant(pixel_at(p, cx - d, cy + d)), dominant(pixel_at(p, cx + d, cy + d))};
+        check(got == "rgbw", "a 2x2 texture lands the right way up: top-left red, top-right green, bottom-left blue, bottom-right white (got " + got + ")");
+        check(dominant(pixel_at(p, 3, 3)) == 'b', "outside the quad is the sky");
+    }
+    {
+        // 50% grey (128) is about 21.6% linear light. Rendered and gamma-encoded again it should
+        // come out near half as bright as white; with no sRGB decode it would be ~73%.
+        const std::array<uint8_t, 3> grey = {128, 128, 128}, white = {255, 255, 255};
+        Renderer r = textured_scene(make_quad(3.0f, 1.0f), solid_2x2({grey, grey, white, white}), 0.4f);
+        const uint32_t *p = r.render(camera_at_origin(), 0, 1);
+        const int d = px(1.5);
+        const double ratio = static_cast<double>(channel(pixel_at(p, W / 2 - d, H / 2 - d), 8)) /
+            channel(pixel_at(p, W / 2 - d, H / 2 + d), 8);
+        std::printf("  grey / white brightness ratio: %.3f (0.50 if sRGB-decoded, 0.73 if not)\n", ratio);
+        check(ratio > 0.42 && ratio < 0.58, "textures are decoded from sRGB to linear light");
+    }
+    {
+        // uvs 0..2 tile the 2x2 texture twice each way, so cells two apart match.
+        const std::array<uint8_t, 3> red = {255, 0, 0}, green = {0, 255, 0}, blue = {0, 0, 255}, white = {255, 255, 255};
+        Renderer r = textured_scene(make_quad(3.0f, 2.0f), solid_2x2({red, green, blue, white}));
+        const uint32_t *p = r.render(camera_at_origin(), 0, 1);
+        const int cx = W / 2, cy = H / 2, cell_px = px(1.5);  // a 4x4 grid of cells over the quad, 1.5 units each
+        auto cell = [&](const int col, const int row) {
+            return dominant(pixel_at(p, cx + (col - 2) * cell_px + cell_px / 2, cy + (row - 2) * cell_px + cell_px / 2));
+        };
+        check(cell(0, 0) == 'r' && cell(1, 0) == 'g' && cell(2, 0) == 'r' && cell(3, 0) == 'g' &&
+                  cell(0, 1) == 'b' && cell(1, 1) == 'w' && cell(2, 1) == 'b' && cell(3, 3) == 'w',
+            "uvs past 1 repeat the texture");
+    }
+    {
+        // A texture on one instance must not leak onto another that has none.
+        const std::array<uint8_t, 3> red = {255, 0, 0};
+        const Material white = make_material({1, 1, 1}, 0.5f, 0.0f, 0.0f, 1.0f);
+        Mesh quad = make_quad(1.0f, 1.0f);
+        Renderer r(W, H, {}, {{{0, 0, 2}, 1.0f, 0.0f}}, Plane{}, {quad},
+            {{0, make_transform({-2, 0, 0}), white, 0}, {0, make_transform({2, 0, 0}), white}}, {solid_2x2({red, red, red, red})});
+        const uint32_t *p = r.render(camera_at_origin(), 0, 1);
+        check(dominant(pixel_at(p, W / 2 - px(2.0), H / 2)) == 'r' && dominant(pixel_at(p, W / 2 + px(2.0), H / 2)) == 'w',
+            "only the instance that names the texture is textured");
+    }
+
+    std::puts("normals and textures reject bad input");
+    {
+        const Material mat = s.spheres[0].material;
+        const Texture ok = solid_2x2({{{1, 2, 3}, {4, 5, 6}, {7, 8, 9}, {1, 1, 1}}});
+        auto make = [&](const Mesh &m, const std::vector<Instance> &i, const std::vector<Texture> &t) {
+            Renderer r(W, H, {}, {}, Plane{}, {m}, i, t);
+        };
+        Mesh quad = make_quad(1.0f, 1.0f);
+        Mesh bad_normals = quad;
+        bad_normals.normals = {{0, 0, 1}};
+        expect_throw<std::invalid_argument>("normals not one per vertex", [&] { make(bad_normals, {{0, identity_transform(), mat}}, {}); });
+        Mesh bad_uvs = quad;
+        bad_uvs.uvs.pop_back();
+        expect_throw<std::invalid_argument>("uvs not one per vertex", [&] { make(bad_uvs, {{0, identity_transform(), mat}}, {}); });
+        Mesh nan_uv = quad;
+        nan_uv.uvs[1].u = nan;
+        expect_throw<std::invalid_argument>("NaN uv", [&] { make(nan_uv, {{0, identity_transform(), mat}}, {}); });
+        Mesh nan_normal = quad;
+        nan_normal.normals.assign(4, Vec3{0, 0, 1});
+        nan_normal.normals[2].y = inf;
+        expect_throw<std::invalid_argument>("infinite normal", [&] { make(nan_normal, {{0, identity_transform(), mat}}, {}); });
+        expect_throw<std::invalid_argument>("texture index past the end", [&] { make(quad, {{0, identity_transform(), mat, 1}}, {ok}); });
+        expect_throw<std::invalid_argument>("texture on a mesh with no uvs", [&] {
+            Mesh no_uvs = quad;
+            no_uvs.uvs.clear();
+            make(no_uvs, {{0, identity_transform(), mat, 0}}, {ok});
+        });
+        Texture short_pixels = ok;
+        short_pixels.rgba.pop_back();
+        expect_throw<std::invalid_argument>("texture with too few bytes", [&] { make(quad, {}, {short_pixels}); });
+        Texture empty;
+        expect_throw<std::invalid_argument>("texture of size 0", [&] { make(quad, {}, {empty}); });
+
+        bool accepted = true;
+        try { make(quad, {{0, identity_transform(), mat}}, {ok}); } catch (...) { accepted = false; }
+        check(accepted, "a texture nobody uses is accepted");
+    }
+
+
+    std::puts("ambient light");
+    {
+        // A sphere lit only from behind: the face the camera sees gets no direct light at all.
+        const Material mat = make_material({0.8f, 0.4f, 0.2f}, 0.9f, 0.5f, 0.0f, 20.0f);
+        Renderer r(W, H, {{{0, 0, -10}, 2, mat}}, {{{0, 0, -40}, 1.0f, 0.0f}});
+        auto centre = [&] {
+            const uint32_t *p = r.render(camera_at_origin(), 0, 1);
+            return p[(H / 2) * W + W / 2];
+        };
+        check(r.ambient() == 0.0f, "ambient defaults to 0");
+        check((centre() & 0xFFFFFF) == 0, "with no ambient, a face turned from every light is black");
+        r.set_ambient(0.3f);
+        const uint32_t lit = centre();
+        const int red = static_cast<int>((lit >> 16) & 0xFF), blue = static_cast<int>(lit & 0xFF);
+        // 0.3 * 0.9 * 0.8 = 0.216 linear, gamma-encoded: about 0.5 -> 128. Blue is a quarter of red's colour.
+        std::printf("  centre pixel with ambient 0.3: red %d, blue %d\n", red, blue);
+        check(red > 100 && red < 150 && blue < red, "ambient adds diffuse colour times the setting");
+        r.set_ambient(0.0f);
+        check((centre() & 0xFFFFFF) == 0, "setting it back to 0 restores black");
+
+        expect_throw<std::invalid_argument>("negative ambient", [&] { r.set_ambient(-0.1f); });
+        expect_throw<std::invalid_argument>("NaN ambient", [&] { r.set_ambient(nan); });
+        expect_throw<std::invalid_argument>("infinite ambient", [&] { r.set_ambient(inf); });
+        check(r.ambient() == 0.0f, "a rejected value changes nothing");
     }
 
     std::puts("meshes reject bad input");

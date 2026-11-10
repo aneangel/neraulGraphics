@@ -25,6 +25,7 @@ constexpr float NO_HIT = 1e30f;
 struct Instance {
     float4 inv[3];   // world -> mesh space, top three rows; only the inverse is needed on the device
     int blas_root;   // root of this instance's mesh in the shared node array
+    int texture;     // index into MeshScene::textures, or -1
     Material material;
 };
 
@@ -34,8 +35,14 @@ struct MeshScene {
     const Instance *instances;
     const bvh::Node *blas;       // every mesh's nodes, concatenated
     const float4 *triangles;     // 3 float4 per triangle: v0, e1, e2
+    const float4 *attributes;    // 4 float4 per triangle (see BuiltMeshes::attributes), or null if no mesh has any
+    const cudaTextureObject_t *textures;
     int instance_count;
 };
+
+// Matches mesh_build.h. Repeated here because that header is host-only.
+constexpr int ATTR_NORMALS = 1;
+constexpr int ATTR_UVS = 2;
 
 __device__ __forceinline__ float3 xyz3(const float4 &v) { return make_float3(v.x, v.y, v.z); }
 
@@ -60,10 +67,11 @@ __device__ __forceinline__ float box_entry(const float4 &lo, const float4 &hi, c
 }
 
 // Two-sided ray-triangle test (Moller-Trumbore). d need not be normalized; t is
-// in units of d. Not watertight: a ray through an exact shared edge can slip
+// in units of d. u and v are the barycentric weights of vertices 1 and 2 (vertex 0
+// gets 1 - u - v). Not watertight: a ray through an exact shared edge can slip
 // between two triangles.
 __device__ __forceinline__ bool triangle_hit(const float4 *tris, const int i, const float3 &o,
-    const float3 &d, const float tmax, float &t) {
+    const float3 &d, const float tmax, float &t, float &bu, float &bv) {
     const float3 v0 = xyz3(tris[3 * i]);
     const float3 e1 = xyz3(tris[3 * i + 1]);
     const float3 e2 = xyz3(tris[3 * i + 2]);
@@ -78,6 +86,8 @@ __device__ __forceinline__ bool triangle_hit(const float4 *tris, const int i, co
     const float v = dot(d, q) * inv_det;
     if (v < 0.0f || u + v > 1.0f) return false;
     t = dot(e2, q) * inv_det;
+    bu = u;
+    bv = v;
     return t > 0.0f && t < tmax;
 }
 
@@ -148,9 +158,9 @@ __device__ __forceinline__ float3 to_local_dir(const Instance &inst, const float
 
 // Closest hit. tmax is the distance to beat on entry (the sphere or floor hit found
 // already) and the hit distance on a true return. Writes which instance and which
-// triangle (an index into the global triangle array).
+// triangle (an index into the global triangle array), and where in it (barycentrics).
 __device__ bool mesh_intersect(const MeshScene &m, const float3 &o, const float3 &d, float &tmax,
-    int &hit_instance, int &hit_triangle) {
+    int &hit_instance, int &hit_triangle, float &hit_u, float &hit_v) {
     bool found = false;
     traverse(m.tlas, 0, o, safe_inverse(d), tmax, [&](const int first, const int count, float &top_tmax) {
         for (int k = 0; k < count; ++k) {
@@ -161,11 +171,13 @@ __device__ bool mesh_intersect(const MeshScene &m, const float3 &o, const float3
             traverse(m.blas, inst.blas_root, lo, safe_inverse(ld), top_tmax,
                 [&](const int tri_first, const int tri_count, float &t_best) {
                     for (int j = tri_first; j < tri_first + tri_count; ++j) {
-                        float t;
-                        if (triangle_hit(m.triangles, j, lo, ld, t_best, t)) {
+                        float t, bu, bv;
+                        if (triangle_hit(m.triangles, j, lo, ld, t_best, t, bu, bv)) {
                             t_best = t;
                             hit_instance = id;
                             hit_triangle = j;
+                            hit_u = bu;
+                            hit_v = bv;
                             found = true;
                         }
                     }
@@ -188,8 +200,8 @@ __device__ bool mesh_occluded(const MeshScene &m, const float3 &o, const float3 
             const bool blocked = traverse(m.blas, inst.blas_root, lo, safe_inverse(ld), top_tmax,
                 [&](const int tri_first, const int tri_count, float &t_best) {
                     for (int j = tri_first; j < tri_first + tri_count; ++j) {
-                        float t;
-                        if (triangle_hit(m.triangles, j, lo, ld, t_best, t)) return true;
+                        float t, bu, bv;
+                        if (triangle_hit(m.triangles, j, lo, ld, t_best, t, bu, bv)) return true;
                     }
                     return false;
                 });
@@ -199,14 +211,42 @@ __device__ bool mesh_occluded(const MeshScene &m, const float3 &o, const float3 
     });
 }
 
-// The surface normal at a triangle hit, facing the incoming ray (triangles are two-sided).
-// Normals are covectors: they transform by the inverse transpose, which for the stored
-// inverse M^-1 means taking its rows as the basis, not its columns.
-__device__ float3 mesh_normal(const MeshScene &m, const int instance, const int triangle, const float3 &dir) {
+// The shading normal and colour tint at a triangle hit, both facing the incoming ray
+// (triangles are two-sided). Normals are covectors: they transform by the inverse
+// transpose, which for the stored inverse M^-1 means taking its rows as the basis, not
+// its columns. With vertex normals the normal is interpolated, so a coarse mesh shades
+// smooth; the geometric normal then only decides which side faces the viewer. With a
+// texture and uvs, the tint is the texture colour at the hit and white otherwise.
+__device__ void mesh_surface(const MeshScene &m, const int instance, const int triangle, const float hit_u,
+    const float hit_v, const float3 &dir, float3 &normal, float3 &tint) {
     const Instance &inst = m.instances[instance];
+    const float3 r0 = xyz3(inst.inv[0]), r1 = xyz3(inst.inv[1]), r2 = xyz3(inst.inv[2]);
+
     const float3 nl = cross(xyz3(m.triangles[3 * triangle + 1]), xyz3(m.triangles[3 * triangle + 2]));
-    const float3 n = normalize(xyz3(inst.inv[0]) * nl.x + xyz3(inst.inv[1]) * nl.y + xyz3(inst.inv[2]) * nl.z);
-    return dot(n, dir) > 0.0f ? -n : n;
+    float3 geometric = normalize(r0 * nl.x + r1 * nl.y + r2 * nl.z);
+    if (dot(geometric, dir) > 0.0f) geometric = -geometric;  // face the viewer
+    normal = geometric;
+    tint = make_float3(1.0f, 1.0f, 1.0f);
+
+    if (m.attributes == nullptr) return;
+    const float4 a0 = m.attributes[4 * triangle], a1 = m.attributes[4 * triangle + 1];
+    const float4 a2 = m.attributes[4 * triangle + 2], a3 = m.attributes[4 * triangle + 3];
+    const int flags = __float_as_int(a3.w);
+    const float w0 = 1.0f - hit_u - hit_v;
+
+    if (flags & ATTR_NORMALS) {
+        const float3 n = xyz3(a0) * w0 + xyz3(a1) * hit_u + xyz3(a2) * hit_v;
+        if (dot(n, n) > 1e-12f) {
+            const float3 smooth = normalize(r0 * n.x + r1 * n.y + r2 * n.z);
+            normal = dot(smooth, geometric) < 0.0f ? -smooth : smooth;
+        }
+    }
+    if ((flags & ATTR_UVS) && inst.texture >= 0) {
+        const float u = a0.w * w0 + a1.w * hit_u + a2.w * hit_v;
+        const float v = a3.x * w0 + a3.y * hit_u + a3.z * hit_v;
+        const float4 c = tex2D<float4>(m.textures[inst.texture], u, v);  // sRGB -> linear, bilinear, repeating
+        tint = make_float3(c.x, c.y, c.z);
+    }
 }
 
 }  // namespace neraulgraphics::device

@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import numpy as np
 
-from ._core import Mesh
+from ._core import Mesh, Texture
 
-__all__ = ["capsule", "cone", "cylinder", "plane", "pose_matrices", "compose_poses", "quat_to_matrix", "uv_sphere"]
+__all__ = ["capsule", "checker_texture", "compose_poses", "cone", "cylinder", "plane", "pose_matrices", "quat_to_matrix",
+           "uv_sphere"]
 
 
 def _revolve(profile: np.ndarray, segments: int) -> Mesh:
@@ -91,11 +92,35 @@ def cone(radius: float = 1.0, half_height: float = 1.0, segments: int = 32) -> M
                     segments)
 
 
-def plane(width: float, length: float) -> Mesh:
-    """A flat rectangle in the XY plane, ``width`` along X and ``length`` along Y (full sizes)."""
+def plane(width: float, length: float, tile: float | None = None) -> Mesh:
+    """A flat rectangle in the XY plane, ``width`` along X and ``length`` along Y (full sizes).
+
+    With ``tile`` it has texture coordinates that repeat a texture once every ``tile`` units.
+    """
     x, y = width / 2.0, length / 2.0
+    uvs = None
+    if tile is not None:
+        u, v = width / tile, length / tile
+        uvs = np.array([[0, v], [u, v], [u, 0], [0, 0]], dtype=np.float32)
     return Mesh(np.array([[-x, -y, 0], [x, -y, 0], [x, y, 0], [-x, y, 0]], dtype=np.float32),
-                np.array([[0, 1, 2], [0, 2, 3]], dtype=np.uint32))
+                np.array([[0, 1, 2], [0, 2, 3]], dtype=np.uint32), uvs=uvs)
+
+
+def checker_texture(color_a=(0.30, 0.33, 0.38), color_b=(0.40, 0.43, 0.48), size: int = 64) -> Texture:
+    """A 2 x 2 checkerboard (one repeat of the pattern) of two colours given as 0..1 RGB.
+
+    ``size`` is the image's side in pixels, a multiple of 2. Colours are what you see on screen
+    (sRGB), not linear light.
+    """
+    if size < 2 or size % 2:
+        raise ValueError(f"size must be an even number of at least 2, got {size}")
+    half = size // 2
+    a = np.round(np.clip(color_a, 0, 1) * 255).astype(np.uint8)
+    b = np.round(np.clip(color_b, 0, 1) * 255).astype(np.uint8)
+    image = np.empty((size, size, 3), dtype=np.uint8)
+    image[:half, :half] = image[half:, half:] = a
+    image[:half, half:] = image[half:, :half] = b
+    return Texture(image)
 
 
 def quat_to_matrix(q: np.ndarray) -> np.ndarray:

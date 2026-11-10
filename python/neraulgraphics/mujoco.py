@@ -32,7 +32,7 @@ import numpy as np
 
 from ._adapter import SceneBuilder, SimRenderer, scene_bounds
 from ._core import Light, Mesh
-from .shapes import capsule, cylinder, matrices_from_rotations, plane
+from .shapes import capsule, checker_texture, cylinder, matrices_from_rotations, plane
 
 __all__ = ["MuJoCoRenderer"]
 
@@ -40,6 +40,7 @@ _GEOM = mujoco.mjtGeom
 _DEFAULT_RGBA = np.array([0.5, 0.5, 0.5, 1.0], dtype=np.float32)
 # MuJoCo's own convention for a plane with size 0: it extends forever.
 _INFINITE_PLANE = 1000.0
+_GROUND_TILE = 2.0  # one checkerboard repeat per this many metres
 
 
 class MuJoCoRenderer(SimRenderer):
@@ -50,12 +51,13 @@ class MuJoCoRenderer(SimRenderer):
         width, height: Image size in pixels.
         geom_groups: Which geom groups to draw. Defaults to 0, 1 and 2, as MuJoCo's viewer does.
         lights: Lights to use. By default a key and a fill light are placed from the scene's size.
+        ambient: Light that reaches every surface regardless of the lights, as a fraction of its colour.
         fov: Vertical field of view of the default camera, in radians.
     """
 
     def __init__(self, model: mujoco.MjModel, width: int = 1280, height: int = 720, *,
                  geom_groups: Collection[int] = (0, 1, 2), lights: Sequence[Light] | None = None,
-                 fov: float = 1.0) -> None:
+                 fov: float = 1.0, ambient: float = 0.2) -> None:
         builder = SceneBuilder()
         keep: list[int] = []
         scales: list[np.ndarray] = []
@@ -74,7 +76,13 @@ class MuJoCoRenderer(SimRenderer):
             mesh_index, scale, radius = made
             if model.geom_matid[g] >= 0 and np.allclose(rgba, _DEFAULT_RGBA):
                 rgba = model.mat_rgba[model.geom_matid[g]]  # the geom takes its material's colour
-            builder.add(mesh_index, rgba[:3])
+            if kind == _GEOM.mjGEOM_PLANE:
+                # A checkerboard in the geom's own colour, so the ground shows scale and motion.
+                base = np.asarray(rgba[:3], dtype=np.float64)
+                builder.add(mesh_index, (1.0, 1.0, 1.0), builder.texture(
+                    ("ground", tuple(base)), lambda: checker_texture(base * 0.85, np.minimum(base * 1.15, 1.0))))
+            else:
+                builder.add(mesh_index, rgba[:3])
             keep.append(g)
             scales.append(scale)
             radii.append(radius)
@@ -92,7 +100,7 @@ class MuJoCoRenderer(SimRenderer):
         solid = reach > 0
         center, extent = scene_bounds(position[solid], reach[solid])
         super().__init__(width, height, builder, up=(0.0, 0.0, 1.0), center=center, extent=extent, lights=lights,
-                         fov=fov)
+                         fov=fov, ambient=ambient)
         self._place(probe)
 
     @staticmethod
@@ -115,7 +123,7 @@ class MuJoCoRenderer(SimRenderer):
         if kind == _GEOM.mjGEOM_PLANE:
             width = 2.0 * size[0] if size[0] > 0.0 else _INFINITE_PLANE
             length = 2.0 * size[1] if size[1] > 0.0 else _INFINITE_PLANE
-            return builder.mesh(("plane", width, length), lambda: plane(width, length), 0.0), one, 0.0
+            return builder.mesh(("plane", width, length), lambda: plane(width, length, _GROUND_TILE), 0.0), one, 0.0
         if kind == _GEOM.mjGEOM_MESH:
             mesh = int(model.geom_dataid[g])
             v0, nv = int(model.mesh_vertadr[mesh]), int(model.mesh_vertnum[mesh])

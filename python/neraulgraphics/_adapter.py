@@ -11,8 +11,8 @@ from collections.abc import Callable, Hashable, Sequence
 
 import numpy as np
 
-from ._core import Camera, Instance, Light, Material, Mesh, Renderer, Transform, make_camera, make_icosphere
-from ._core import make_box
+from ._core import Camera, Instance, Light, Material, Mesh, Renderer, Texture, Transform, make_box, make_camera
+from ._core import make_icosphere
 
 __all__ = ["SceneBuilder", "SimRenderer", "scene_bounds"]
 
@@ -34,6 +34,7 @@ class SceneBuilder:
         self.meshes: list[Mesh] = []
         self.radius: list[float] = []  # per mesh: how far any vertex is from the origin
         self.instances: list[Instance] = []
+        self.textures: list[Texture] = []
         self._by_key: dict[Hashable, int] = {}
 
     def mesh(self, key: Hashable, make: Callable[[], Mesh], radius: float) -> int:
@@ -47,15 +48,22 @@ class SceneBuilder:
             self.radius.append(float(radius))
         return self._by_key[key]
 
+    def texture(self, key: Hashable, make: Callable[[], Texture]) -> int:
+        """The index of the texture for ``key``, calling ``make`` only the first time."""
+        if ("texture", key) not in self._by_key:
+            self._by_key[("texture", key)] = len(self.textures)
+            self.textures.append(make())
+        return self._by_key[("texture", key)]
+
     def unit_sphere(self) -> int:
         return self.mesh("unit_sphere", lambda: make_icosphere(1.0, 3), 1.0)
 
     def unit_box(self) -> int:
         return self.mesh("unit_box", lambda: make_box((1.0, 1.0, 1.0)), float(np.sqrt(3.0)))
 
-    def add(self, mesh: int, color: Sequence[float]) -> int:
+    def add(self, mesh: int, color: Sequence[float], texture: int = -1) -> int:
         """Adds an instance at the origin. The first ``set_instance_transforms`` places it."""
-        self.instances.append(Instance(mesh, Transform(np.eye(4, dtype=np.float32)), _material(color)))
+        self.instances.append(Instance(mesh, Transform(np.eye(4, dtype=np.float32)), _material(color), texture))
         return len(self.instances) - 1
 
 
@@ -77,15 +85,19 @@ def _horizontal(up: np.ndarray) -> np.ndarray:
 class SimRenderer:
     """Common to every adapter: owns the :class:`Renderer` and the camera conveniences."""
 
-    def __init__(self, width: int, height: int, builder: SceneBuilder, *, up: Sequence[float],
-                 center: Sequence[float], extent: float, lights: Sequence[Light] | None, fov: float) -> None:
+    def __init__(self, width: int, height: int, scene, *, up: Sequence[float],
+                 center: Sequence[float], extent: float, lights: Sequence[Light] | None, fov: float,
+                 ambient: float = 0.2) -> None:
+        # scene: anything with .meshes, .instances and .textures (a SceneBuilder, or a LoadedScene).
         # center and extent: the middle and half-size of what is worth looking at.
         self.width, self.height, self.fov = width, height, fov
         self.up = np.asarray(up, dtype=np.float64)
         self.center = np.asarray(center, dtype=np.float64)
         self.extent = float(max(extent, 1e-3))
         self.renderer = Renderer(width, height, [], list(lights) if lights is not None else self.default_lights(),
-                                 meshes=builder.meshes, instances=builder.instances)
+                                 meshes=scene.meshes, instances=scene.instances, textures=scene.textures)
+        # Surfaces turned from every light would be black; a little ambient light keeps them readable.
+        self.renderer.ambient = ambient
 
     @property
     def instance_count(self) -> int:

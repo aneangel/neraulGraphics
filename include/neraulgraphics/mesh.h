@@ -19,6 +19,22 @@ struct Mesh {
     std::vector<Vec3> vertices;
     // Three indices per triangle. Winding does not matter: triangles are two-sided.
     std::vector<uint32_t> indices;
+    // Optional, one per vertex or empty. With normals, shading is smooth: the normal is
+    // interpolated across each triangle instead of being the triangle's own. They need not
+    // be unit length. With uvs, an Instance's texture can be mapped on.
+    std::vector<Vec3> normals;
+    // Texture coordinates with the origin at the image's top left and v pointing down,
+    // as glTF has them (an OBJ's v is flipped by the loader). Outside 0..1 they repeat.
+    std::vector<Vec2> uvs;
+};
+
+// An RGBA image, 8 bits per channel, rows from top to bottom, colour sRGB-encoded as
+// it is in a PNG or JPEG. The renderer converts to linear light when it samples, and
+// filters bilinearly. Alpha is stored but not used.
+struct Texture {
+    int width = 0;
+    int height = 0;
+    std::vector<uint8_t> rgba;  // width * height * 4 bytes
 };
 
 // Rotation as a unit quaternion, vector part first (x, y, z, w), the order Warp,
@@ -48,6 +64,10 @@ struct Instance {
     int mesh;  // index into the meshes the Renderer was given
     Transform transform;
     Material material;
+    // Index into the textures the Renderer was given, or -1 for none. The texture colour is
+    // multiplied into material.diffuse_color, so a textured material usually wants a white
+    // diffuse_color. The mesh must have uvs.
+    int texture = -1;
 };
 
 // An axis-aligned box centred on the origin, 12 triangles.

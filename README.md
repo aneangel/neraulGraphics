@@ -14,6 +14,7 @@ sharpens the longer the camera holds still.
 - **Library first.** `pip install` and `import neraulgraphics`, or `find_package(neraulgraphics)` in C++. No window or engine to adopt.
 - **Meshes and instancing.** Share triangle meshes between any number of instances. Moving an instance only updates a small BVH, so thousands of moving bodies stay cheap.
 - **Dynamic scenes.** `set_instance_transforms()` takes a pose per instance each frame, with poses as position plus `(x, y, z, w)` quaternion, the convention Warp, MuJoCo and Newton use.
+- **Load models.** `ng.load("model.glb")` reads glTF, GLB and OBJ with materials, colour textures, smooth normals and node hierarchies.
 - **Newton and MuJoCo adapters.** `NewtonRenderer(model).render(state)` and `MuJoCoRenderer(model).render(data)`: shapes become instances once, and each frame only poses are updated.
 - **Reflections, soft shadows, anti-aliasing**, plus progressive refinement while the camera is still.
 - **Interactive viewer** with free-fly camera: `make raytracer`.
@@ -52,6 +53,20 @@ for frame in range(64):                  # more frames, smoother image
 
 Move things every frame with `renderer.set_instance_transforms(matrices)`, an
 `(N, 3, 4)` float array, then render with `frame=0`.
+
+## Loading a model
+
+```python
+scene = ng.load("duck.glb")              # .glb, .gltf or .obj
+image = scene.renderer(1280, 720).render()
+```
+
+The renderer picks a camera and lights from the model's size; `view.camera(position)`
+takes over the camera. For more control, hand `scene.meshes`, `scene.instances` and
+`scene.textures` to `ng.Renderer` yourself. Reading texture images needs Pillow
+(`pip install neraulgraphics[images]`). Not supported: animation and skinning (a
+skinned model draws in its bind pose), normal and roughness maps, transparency,
+Draco-compressed glTF. See [examples/view_model.py](examples/view_model.py) for a turntable.
 
 ## Rendering a simulation
 

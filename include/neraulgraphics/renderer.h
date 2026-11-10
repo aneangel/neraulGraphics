@@ -48,14 +48,19 @@ public:
     // of instances may use one mesh, and the count of instances is not limited the
     // way spheres and lights are. Each mesh's BVH is built here, once.
     //
+    // textures are images instances can name; see Instance::texture.
+    //
     // Throws std::invalid_argument if width or height is not positive, if there are
     // more than MAX_SPHERES spheres or MAX_LIGHTS lights, if a sphere radius is not
     // positive, if a light radius is negative, if a mesh has no triangles or an index
-    // out of range, if an instance names a mesh that does not exist or has a
-    // singular transform, or if any value is NaN or infinite.
+    // out of range, if a mesh's normals or uvs are not one per vertex, if an instance
+    // names a mesh or texture that does not exist, uses a texture on a mesh without
+    // uvs, or has a singular transform, if a texture's size does not match its
+    // pixels, or if any value is NaN or infinite.
     Renderer(int width, int height, const std::vector<Sphere> &spheres,
         const std::vector<Light> &lights, const Plane &floor = Plane{},
-        const std::vector<Mesh> &meshes = {}, const std::vector<Instance> &instances = {});
+        const std::vector<Mesh> &meshes = {}, const std::vector<Instance> &instances = {},
+        const std::vector<Texture> &textures = {});
     ~Renderer();
 
     // Owns device memory, so it can be moved but not copied.
@@ -76,6 +81,16 @@ public:
     // A NaN reaching the running average would blacken that pixel until the next
     // restart, so a camera with any non-finite value is rejected as well.
     const uint32_t *render(const Camera &camera, int frame, int samples_per_frame);
+
+    // Light that reaches every surface regardless of the lights, as a fraction of its diffuse
+    // colour: a stand-in for light bounced from the rest of the scene, which this renderer does
+    // not trace. 0 (the default) leaves surfaces facing away from every light black; around
+    // 0.1 to 0.3 keeps detail visible there. Takes effect on the next render(), and the
+    // accumulated image should be restarted with frame 0, as for any scene change.
+    //
+    // Throws std::invalid_argument, changing nothing, if ambient is negative, NaN or infinite.
+    void set_ambient(float ambient);
+    float ambient() const;
 
     // Moves the instances: transforms[i] replaces instance i's Transform. Only the
     // top-level BVH over instances is rebuilt (on the host, then uploaded); the

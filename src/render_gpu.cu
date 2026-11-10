@@ -47,6 +47,7 @@ struct SceneParams {
     Light lights[MAX_LIGHTS];
     Plane floor;
     MeshScene mesh;
+    float ambient;
     int sphere_count;
     int light_count;
 };
@@ -99,7 +100,9 @@ __device__ bool scene_intersect(const SceneParams &s, const float3 &origin, cons
     // limit, and skips every box beyond it.
     int best_instance = -1;
     int best_triangle = -1;
-    if (s.mesh.instance_count > 0 && mesh_intersect(s.mesh, origin, dir, best, best_instance, best_triangle)) {
+    float best_u = 0.0f, best_v = 0.0f;
+    if (s.mesh.instance_count > 0 &&
+        mesh_intersect(s.mesh, origin, dir, best, best_instance, best_triangle, best_u, best_v)) {
         best_sphere = -1;
         hit_floor = false;
     } else {
@@ -112,8 +115,10 @@ __device__ bool scene_intersect(const SceneParams &s, const float3 &origin, cons
     hit.point = origin + dir * best;
 
     if (best_instance >= 0) {
-        hit.normal = mesh_normal(s.mesh, best_instance, best_triangle, dir);
+        float3 tint;
+        mesh_surface(s.mesh, best_instance, best_triangle, best_u, best_v, dir, hit.normal, tint);
         hit.material = s.mesh.instances[best_instance].material;
+        hit.material.diffuse_color = hit.material.diffuse_color * tint;
     } else if (hit_floor) {
         hit.normal = make_float3(0.0f, 1.0f, 0.0f);
         hit.material = s.floor.material;
@@ -190,7 +195,7 @@ __device__ float3 trace(const SceneParams &s, float3 origin, float3 dir, RNG &rn
 
         const float3 direct = hit.material.diffuse_color * (diffuse * hit.material.diffuse_albedo) +
             make_float3(1.0f, 1.0f, 1.0f) * (specular * hit.material.specular_albedo);
-        radiance += direct * throughput;
+        radiance += (direct + hit.material.diffuse_color * (s.ambient * hit.material.diffuse_albedo)) * throughput;
 
         throughput *= hit.material.reflectivity;
         if (throughput < MIN_THROUGHPUT) break;
@@ -334,6 +339,13 @@ struct Renderer::Impl {
     bvh::Node *d_tlas = nullptr;
     int *d_tlas_instance = nullptr;
     device::Instance *d_instances = nullptr;
+    float4 *d_attributes = nullptr;
+    // Textures: each is a CUDA array behind a texture object, which does the filtering and
+    // the sRGB decode in hardware. d_textures is the array of handles the kernel indexes.
+    std::vector<cudaArray_t> texture_arrays;
+    std::vector<cudaTextureObject_t> texture_objects;
+    cudaTextureObject_t *d_textures = nullptr;
+    std::vector<int> instance_texture;
     std::vector<int> instance_mesh;
     std::vector<neraulgraphics::Material> instance_material;
     std::vector<int> mesh_root;
@@ -353,6 +365,10 @@ struct Renderer::Impl {
         cudaFree(d_tlas);
         cudaFree(d_tlas_instance);
         cudaFree(d_instances);
+        cudaFree(d_attributes);
+        cudaFree(d_textures);
+        for (const cudaTextureObject_t t : texture_objects) cudaDestroyTextureObject(t);
+        for (const cudaArray_t a : texture_arrays) cudaFreeArray(a);
         if (ev_start) cudaEventDestroy(ev_start);
         if (ev_stop) cudaEventDestroy(ev_stop);
     }
@@ -375,6 +391,7 @@ void upload_instances(ImplT &r, const std::vector<Transform> &transforms) {
             d.inv[row] = make_float4(inverse.m[4 * row], inverse.m[4 * row + 1], inverse.m[4 * row + 2],
                 inverse.m[4 * row + 3]);
         d.blas_root = r.mesh_root[r.instance_mesh[i]];
+        d.texture = r.instance_texture[i];
         d.material = device::to_device(r.instance_material[i]);
         boxes[i] = detail::transform_aabb(transforms[i], r.mesh_bounds[r.instance_mesh[i]]);
     }
@@ -408,10 +425,10 @@ void upload_instances(ImplT &r, const std::vector<Transform> &transforms) {
 
 Renderer::Renderer(const int width, const int height, const std::vector<Sphere> &spheres,
     const std::vector<Light> &lights, const Plane &floor, const std::vector<Mesh> &meshes,
-    const std::vector<Instance> &instances) {
+    const std::vector<Instance> &instances, const std::vector<Texture> &textures) {
     check_frame_size(width, height);
     check_scene(spheres, lights, floor);
-    detail::check_meshes(meshes, instances);
+    detail::check_meshes(meshes, instances, textures);
 
     // Built in a local first: if any CUDA call throws, its destructor frees
     // whatever was already allocated.
@@ -437,6 +454,35 @@ Renderer::Renderer(const int width, const int height, const std::vector<Sphere> 
     CUDA_CHECK(cudaEventCreate(&r->ev_start));
     CUDA_CHECK(cudaEventCreate(&r->ev_stop));
 
+    for (const Texture &tex : textures) {
+        cudaArray_t array = nullptr;
+        const cudaChannelFormatDesc format = cudaCreateChannelDesc<uchar4>();
+        CUDA_CHECK(cudaMallocArray(&array, &format, tex.width, tex.height));
+        r->texture_arrays.push_back(array);  // owned by r from here, so freed if a later call throws
+        const size_t pitch = static_cast<size_t>(tex.width) * 4;
+        CUDA_CHECK(cudaMemcpy2DToArray(array, 0, 0, tex.rgba.data(), pitch, pitch, tex.height,
+            cudaMemcpyHostToDevice));
+
+        cudaResourceDesc resource{};
+        resource.resType = cudaResourceTypeArray;
+        resource.res.array.array = array;
+        cudaTextureDesc sampler{};
+        sampler.addressMode[0] = cudaAddressModeWrap;  // uvs outside 0..1 repeat
+        sampler.addressMode[1] = cudaAddressModeWrap;
+        sampler.filterMode = cudaFilterModeLinear;
+        sampler.readMode = cudaReadModeNormalizedFloat;
+        sampler.sRGB = 1;  // decoded to linear light before filtering, which is what blending needs
+        sampler.normalizedCoords = 1;
+        cudaTextureObject_t object = 0;
+        CUDA_CHECK(cudaCreateTextureObject(&object, &resource, &sampler, nullptr));
+        r->texture_objects.push_back(object);
+    }
+    if (!textures.empty()) {
+        CUDA_CHECK(cudaMalloc(&r->d_textures, textures.size() * sizeof(cudaTextureObject_t)));
+        CUDA_CHECK(cudaMemcpy(r->d_textures, r->texture_objects.data(),
+            textures.size() * sizeof(cudaTextureObject_t), cudaMemcpyHostToDevice));
+    }
+
     // With no instances there is nothing to build, so a meshless scene pays nothing.
     if (!instances.empty()) {
         const detail::BuiltMeshes built = detail::build_meshes(meshes);
@@ -445,6 +491,7 @@ Renderer::Renderer(const int width, const int height, const std::vector<Sphere> 
         for (const Instance &inst : instances) {
             r->instance_mesh.push_back(inst.mesh);
             r->instance_material.push_back(inst.material);
+            r->instance_texture.push_back(inst.texture);
         }
 
         // 2n-1 nodes at most for n instances.
@@ -458,6 +505,11 @@ Renderer::Renderer(const int width, const int height, const std::vector<Sphere> 
             cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(r->d_triangles, built.triangles.data(), built.triangles.size() * sizeof(float),
             cudaMemcpyHostToDevice));
+        if (!built.attributes.empty()) {
+            CUDA_CHECK(cudaMalloc(&r->d_attributes, built.attributes.size() * sizeof(float)));
+            CUDA_CHECK(cudaMemcpy(r->d_attributes, built.attributes.data(), built.attributes.size() * sizeof(float),
+                cudaMemcpyHostToDevice));
+        }
 
         std::vector<Transform> transforms;
         transforms.reserve(n);
@@ -466,7 +518,7 @@ Renderer::Renderer(const int width, const int height, const std::vector<Sphere> 
 
         // Pointers are stable from here: set_instance_transforms() rewrites these buffers in place.
         r->params.mesh = device::MeshScene{r->d_tlas, r->d_tlas_instance, r->d_instances, r->d_blas,
-            r->d_triangles, static_cast<int>(n)};
+            r->d_triangles, r->d_attributes, r->d_textures, static_cast<int>(n)};
     }
 
     impl_ = std::move(r);
@@ -521,6 +573,14 @@ void Renderer::set_instance_transforms(const std::vector<Transform> &transforms)
 }
 
 int Renderer::instance_count() const { return static_cast<int>(state().instance_mesh.size()); }
+
+void Renderer::set_ambient(const float ambient) {
+    Impl &r = state();
+    require(finite(ambient) && ambient >= 0.0f, "ambient must be 0 or more, got " + std::to_string(ambient));
+    r.params.ambient = ambient;
+}
+
+float Renderer::ambient() const { return state().params.ambient; }
 
 float Renderer::last_kernel_ms() const { return state().kernel_ms; }
 

@@ -12,6 +12,9 @@ call render() to get a (height, width, 3) uint8 RGB numpy array::
     for frame in range(64):  # more frames, smoother image
         image = renderer.render(camera, frame)
 
+Load a model with ``ng.load("model.glb")`` (also ``.gltf`` and ``.obj``) and call
+``.renderer(width, height).render()`` on the result.
+
 Triangle meshes are shared geometry that instances place in the world. Each mesh's
 BVH is built once; moving instances afterwards only updates the small structure
 over them, so a simulation can move thousands of bodies per frame::
@@ -25,6 +28,7 @@ Needs an NVIDIA GPU and driver. Errors in the scene raise ValueError; a failure
 inside CUDA raises neraulgraphics.CudaError.
 """
 
+from .loaders import LoadedScene, SceneRenderer, load, load_gltf, load_obj
 from ._core import (
     MAX_LIGHTS,
     MAX_SPHERES,
@@ -37,6 +41,7 @@ from ._core import (
     Plane,
     Renderer,
     Sphere,
+    Texture,
     Transform,
     __version__,
     identity_transform,
@@ -47,6 +52,11 @@ from ._core import (
 )
 
 __all__ = [
+    "LoadedScene",
+    "SceneRenderer",
+    "load",
+    "load_gltf",
+    "load_obj",
     "MAX_LIGHTS",
     "MAX_SPHERES",
     "Camera",
@@ -58,6 +68,7 @@ __all__ = [
     "Plane",
     "Renderer",
     "Sphere",
+    "Texture",
     "Transform",
     "__version__",
     "identity_transform",

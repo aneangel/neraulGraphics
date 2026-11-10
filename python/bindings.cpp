@@ -8,12 +8,14 @@
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
 #include <nanobind/stl/array.h>
+#include <nanobind/stl/optional.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 #include <neraulgraphics/renderer.h>
@@ -74,8 +76,8 @@ struct PyRenderer {
 
     PyRenderer(const int width, const int height, const std::vector<Sphere> &spheres,
         const std::vector<Light> &lights, const Plane &floor, const std::vector<Mesh> &meshes,
-        const std::vector<Instance> &instances)
-        : renderer(width, height, spheres, lights, floor, meshes, instances) {}
+        const std::vector<Instance> &instances, const std::vector<Texture> &textures)
+        : renderer(width, height, spheres, lights, floor, meshes, instances, textures) {}
 };
 
 // Arrays arrive as C-contiguous float32 or uint32 (anything else is converted),
@@ -85,13 +87,48 @@ using Triangles = nb::ndarray<const uint32_t, nb::shape<-1, 3>, nb::c_contig, nb
 using Matrices = nb::ndarray<const float, nb::shape<-1, 3, 4>, nb::c_contig, nb::device::cpu>;
 using Matrix = nb::ndarray<const float, nb::shape<-1, 4>, nb::c_contig, nb::device::cpu>;
 
-Mesh make_mesh(const Vertices &vertices, const Triangles &triangles) {
+using Uvs = nb::ndarray<const float, nb::shape<-1, 2>, nb::c_contig, nb::device::cpu>;
+using Pixels = nb::ndarray<const uint8_t, nb::shape<-1, -1, -1>, nb::c_contig, nb::device::cpu>;
+
+Mesh make_mesh(const Vertices &vertices, const Triangles &triangles, const std::optional<Vertices> &normals,
+    const std::optional<Uvs> &uvs) {
     Mesh mesh;
     mesh.vertices.resize(vertices.shape(0));
     std::memcpy(mesh.vertices.data(), vertices.data(), vertices.shape(0) * 3 * sizeof(float));
     mesh.indices.resize(triangles.shape(0) * 3);
     std::memcpy(mesh.indices.data(), triangles.data(), triangles.shape(0) * 3 * sizeof(uint32_t));
+    if (normals) {
+        mesh.normals.resize(normals->shape(0));
+        std::memcpy(mesh.normals.data(), normals->data(), normals->shape(0) * 3 * sizeof(float));
+    }
+    if (uvs) {
+        mesh.uvs.resize(uvs->shape(0));
+        std::memcpy(mesh.uvs.data(), uvs->data(), uvs->shape(0) * 2 * sizeof(float));
+    }
     return mesh;
+}
+
+// A (height, width, channels) uint8 image with 1, 3 or 4 channels, widened to RGBA.
+Texture make_texture(const Pixels &image) {
+    const size_t h = image.shape(0), w = image.shape(1), c = image.shape(2);
+    if (c != 1 && c != 3 && c != 4)
+        throw std::invalid_argument("a texture image needs 1 (grey), 3 (RGB) or 4 (RGBA) channels, got " +
+            std::to_string(c));
+    if (w == 0 || h == 0) throw std::invalid_argument("a texture image cannot be empty");
+    if (w > 65536 || h > 65536) throw std::invalid_argument("a texture image is at most 65536 pixels on a side");
+    Texture t;
+    t.width = static_cast<int>(w);
+    t.height = static_cast<int>(h);
+    t.rgba.resize(w * h * 4);
+    const uint8_t *src = image.data();
+    for (size_t i = 0; i < w * h; ++i) {
+        uint8_t *dst = &t.rgba[4 * i];
+        dst[0] = src[c * i];
+        dst[1] = c >= 3 ? src[c * i + 1] : src[c * i];
+        dst[2] = c >= 3 ? src[c * i + 2] : src[c * i];
+        dst[3] = c == 4 ? src[c * i + 3] : 255;
+    }
+    return t;
 }
 
 // A 3x4 or 4x4 matrix; the bottom row of a 4x4 is ignored.
@@ -270,17 +307,37 @@ NB_MODULE(_core, m) {
         "Triangle geometry, shared by every instance that uses it. Its BVH is built once, "
         "when a Renderer is made.")
         .def("__init__",
-            [](Mesh *self, const Vertices &vertices, const Triangles &triangles) {
-                new (self) Mesh(make_mesh(vertices, triangles));
+            [](Mesh *self, const Vertices &vertices, const Triangles &triangles,
+                const std::optional<Vertices> &normals, const std::optional<Uvs> &uvs) {
+                new (self) Mesh(make_mesh(vertices, triangles, normals, uvs));
             },
-            "vertices"_a, "triangles"_a,
+            "vertices"_a, "triangles"_a, "normals"_a = nb::none(), "uvs"_a = nb::none(),
             "vertices: (N, 3) float array. triangles: (M, 3) integer array of vertex indices. "
-            "Winding does not matter; triangles are two-sided.")
+            "Winding does not matter; triangles are two-sided.\n\n"
+            "normals: optional (N, 3), one per vertex, for smooth shading. uvs: optional (N, 2) "
+            "texture coordinates with the origin at the image's top left (v down, as in glTF), "
+            "needed to put a Texture on the mesh.")
         .def_prop_ro("vertex_count", [](const Mesh &mesh) { return mesh.vertices.size(); })
+        .def_prop_ro("has_normals", [](const Mesh &mesh) { return !mesh.normals.empty(); })
+        .def_prop_ro("has_uvs", [](const Mesh &mesh) { return !mesh.uvs.empty(); })
         .def_prop_ro("triangle_count", [](const Mesh &mesh) { return mesh.indices.size() / 3; })
         .def("__repr__", [](const Mesh &mesh) {
             return "Mesh(" + std::to_string(mesh.vertices.size()) + " vertices, " +
                 std::to_string(mesh.indices.size() / 3) + " triangles)";
+        });
+
+    nb::class_<Texture>(m, "Texture",
+        "An image that instances can be painted with. Colour is sRGB, as in a PNG or JPEG; the "
+        "renderer converts to linear light when it samples, and filters bilinearly. uvs outside "
+        "0..1 repeat.")
+        .def("__init__", [](Texture *self, const Pixels &image) { new (self) Texture(make_texture(image)); },
+            "image"_a,
+            "image: a (height, width, channels) uint8 array with 1 (grey), 3 (RGB) or 4 (RGBA) "
+            "channels, rows from the top.")
+        .def_ro("width", &Texture::width)
+        .def_ro("height", &Texture::height)
+        .def("__repr__", [](const Texture &t) {
+            return "Texture(" + std::to_string(t.width) + "x" + std::to_string(t.height) + ")";
         });
 
     m.def("make_box", &make_box, "half_extents"_a, "A box centred on the origin, 12 triangles.");
@@ -291,16 +348,20 @@ NB_MODULE(_core, m) {
         "One placement of a mesh: which mesh (an index into the Renderer's meshes), where, and "
         "what it is made of.")
         .def("__init__",
-            [](Instance *self, const int mesh, const Transform &transform, const Material &material) {
-                new (self) Instance{mesh, transform, material};
-            },
+            [](Instance *self, const int mesh, const Transform &transform, const Material &material,
+                const int texture) { new (self) Instance{mesh, transform, material, texture}; },
             "mesh"_a, "transform"_a = identity_transform(),
-            "material"_a = Material{{0.8f, 0.8f, 0.8f}, 0.9f, 0.1f, 0.0f, 50.0f})
+            "material"_a = Material{{0.8f, 0.8f, 0.8f}, 0.9f, 0.1f, 0.0f, 50.0f}, "texture"_a = -1,
+            "texture: index into the Renderer's textures, or -1 for none. The texture colour is "
+            "multiplied into the material's diffuse_color, so a textured material usually wants "
+            "diffuse_color=(1, 1, 1). The mesh needs uvs.")
         .def_rw("mesh", &Instance::mesh)
+        .def_rw("texture", &Instance::texture)
         .def_rw("transform", &Instance::transform)
         .def_rw("material", &Instance::material)
         .def("__repr__", [](const Instance &i) {
-            return "Instance(mesh=" + std::to_string(i.mesh) + ", material=" + repr(i.material) + ")";
+            return "Instance(mesh=" + std::to_string(i.mesh) + ", material=" + repr(i.material) +
+                (i.texture >= 0 ? ", texture=" + std::to_string(i.texture) : "") + ")";
         });
 
     nb::class_<Camera>(m, "Camera", "Create with make_camera().")
@@ -327,9 +388,10 @@ NB_MODULE(_core, m) {
     nb::class_<PyRenderer>(m, "Renderer",
         "One scene and its frame buffers on the GPU. Safe to share between threads.")
         .def(nb::init<int, int, const std::vector<Sphere> &, const std::vector<Light> &, const Plane &,
-                 const std::vector<Mesh> &, const std::vector<Instance> &>(),
+                 const std::vector<Mesh> &, const std::vector<Instance> &, const std::vector<Texture> &>(),
             "width"_a, "height"_a, "spheres"_a, "lights"_a, "floor"_a = Plane{},
-            "meshes"_a = std::vector<Mesh>{}, "instances"_a = std::vector<Instance>{})
+            "meshes"_a = std::vector<Mesh>{}, "instances"_a = std::vector<Instance>{},
+            "textures"_a = std::vector<Texture>{})
         .def("set_instance_transforms", &set_instance_transforms, "transforms"_a,
             "Move the instances: an (N, 3, 4) float array, one 3x4 matrix per instance in the "
             "order they were given. Only the small BVH over instances is updated, so this is the "
@@ -337,6 +399,18 @@ NB_MODULE(_core, m) {
         .def("set_instance_transforms", &set_instance_transform_list, "transforms"_a,
             "The same, from a list of Transform objects.")
         .def_prop_ro("instance_count", [](PyRenderer &self) { return self.renderer.instance_count(); })
+        .def_prop_rw("ambient",
+            [](PyRenderer &self) {
+                std::lock_guard<std::mutex> lock(self.mutex);
+                return self.renderer.ambient();
+            },
+            [](PyRenderer &self, const float ambient) {
+                std::lock_guard<std::mutex> lock(self.mutex);
+                self.renderer.set_ambient(ambient);
+            },
+            "Light that reaches every surface regardless of the lights, as a fraction of its "
+            "diffuse colour. 0 (the default) leaves surfaces facing away from every light black; "
+            "0.1 to 0.3 keeps detail visible there. Render with frame=0 after changing it.")
         .def("render", &render, "camera"_a, "frame"_a = 0, "samples_per_frame"_a = 1,
             "Trace one frame and return it as a (height, width, 3) uint8 RGB array.\n\n"
             "frame 0 starts a fresh image. Rendering again with frame 1, 2, ... while the "

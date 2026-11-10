@@ -100,7 +100,7 @@ class TestNewton:
                             hx=0.5, hy=0.3, hz=0.2)
 
         model = self.model_with(nt, add)
-        view = NewtonRenderer(model, W, H, lights=LIGHTS)
+        view = NewtonRenderer(model, W, H, lights=LIGHTS, ambient=0.0)  # no ambient, to match the hand-built one
         camera = view.camera((0.5, -4.0, 2.0), (0.8, 0.2, 1.0))
 
         # By hand: the shape sits 0.3 along the body's x axis, which the body turned by `angle` about z.
@@ -153,6 +153,38 @@ class TestNewton:
 
         assert NewtonRenderer(self.model_with(nt, add), W, H).instance_count == 1
 
+    def test_ground_plane_is_a_checkerboard(self, nt, gpu):
+        from neraulgraphics.newton import NewtonRenderer
+        newton, wp = nt
+
+        def add(b, wp):
+            b.add_ground_plane()
+            body = b.add_body(xform=wp.transform(p=wp.vec3(0.0, 0.0, 1.0), q=wp.quat_identity()))
+            b.add_shape_sphere(body, radius=0.4)
+
+        view = NewtonRenderer(self.model_with(nt, add), W, H, lights=LIGHTS)
+        assert view.instance_count == 2  # the sphere and the ground
+        image = view.render(None, view.camera((0.0, -5.0, 3.0), (0.0, 2.0, 0.0))).astype(int)
+        ground = image[H * 3 // 4:, :, 1]  # the lower quarter of the picture is all ground
+        assert ground.max() - ground.min() > 15  # light and dark squares, not one flat colour
+
+    def test_ambient_lights_the_far_side(self, nt, gpu):
+        from neraulgraphics.newton import NewtonRenderer
+        newton, wp = nt
+
+        def add(b, wp):
+            body = b.add_body(xform=wp.transform(p=wp.vec3(0.0, 0.0, 1.0), q=wp.quat_identity()))
+            b.add_shape_sphere(body, radius=0.5)
+
+        model = self.model_with(nt, add)
+        behind = [ng.Light((0, 8, 1), intensity=1.0)]  # the camera looks at the side facing away from this
+        dark = NewtonRenderer(model, W, H, lights=behind, ambient=0.0)
+        lit = NewtonRenderer(model, W, H, lights=behind)  # default ambient
+        assert lit.renderer.ambient == pytest.approx(0.2)
+        camera = dark.camera((0, -4, 1), (0, 0, 1))
+        assert center_pixel(dark.render(None, camera)).max() < 12
+        assert center_pixel(lit.render(None, camera)).max() > 40
+
     def test_up_axis_is_respected(self, nt, gpu):
         from neraulgraphics.newton import NewtonRenderer
         newton, wp = nt
@@ -198,7 +230,7 @@ class TestMuJoCo:
         # A tilted body holding an offset ellipsoid: MuJoCo hands over rotation matrices, not quaternions.
         m, d = self.model(mj, '<body pos="0.2 0 1" euler="20 35 10"><geom type="ellipsoid" pos="0.3 0 0" '
                               'size="0.5 0.3 0.2" rgba="0.8 0.1 0.1 1"/></body>')
-        view = MuJoCoRenderer(m, W, H, lights=LIGHTS)
+        view = MuJoCoRenderer(m, W, H, lights=LIGHTS, ambient=0.0)  # no ambient, to match the hand-built one
         camera = view.camera((0.5, -4.0, 2.0), (0.4, 0.0, 1.0))
         matrix = shapes.matrices_from_rotations(d.geom_xmat.reshape(-1, 3, 3), d.geom_xpos, np.array([[0.5, 0.3, 0.2]]))
         want = hand_built([ng.make_icosphere(1.0, 3)], [(0, RED)], matrix).render(camera)
@@ -233,6 +265,17 @@ class TestMuJoCo:
             m, d = self.model(mj, body, '<material name="red" rgba="0.8 0.1 0.1 1"/>')
             view = MuJoCoRenderer(m, W, H, lights=LIGHTS)
             assert is_red(center_pixel(view.render(d, view.camera((0, -4, 1), (0, 0, 1))))), body
+
+    def test_a_plane_is_a_checkerboard_in_its_own_colour(self, mj, gpu):
+        from neraulgraphics.mujoco import MuJoCoRenderer
+        m, d = self.model(mj, '<geom type="plane" size="0 0 0.1" rgba="0.8 0.3 0.3 1"/>'
+                              '<geom type="sphere" size="0.3" pos="0 0 0.3"/>')
+        view = MuJoCoRenderer(m, W, H, lights=LIGHTS)
+        assert view.instance_count == 2
+        image = view.render(d, view.camera((0, -4, 2), (0, 1, 0))).astype(int)
+        ground = image[H * 3 // 4:, :]
+        assert ground[:, :, 1].max() - ground[:, :, 1].min() > 8  # squares of two shades
+        assert ground[:, :, 0].mean() > ground[:, :, 2].mean() + 20  # and the geom's reddish colour
 
     def test_follows_the_simulation(self, mj, gpu):
         from neraulgraphics.mujoco import MuJoCoRenderer

@@ -18,6 +18,11 @@ struct Vec3 {
     float z;
 };
 
+struct Vec2 {
+    float u;
+    float v;
+};
+
 struct Material {
     Vec3 diffuse_color;
     float diffuse_albedo;

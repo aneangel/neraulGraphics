@@ -32,13 +32,15 @@ import newton
 
 from ._adapter import SceneBuilder, SimRenderer, scene_bounds
 from ._core import Light, Mesh
-from .shapes import capsule, compose_poses, cone, cylinder, plane, pose_matrices
+from .shapes import capsule, checker_texture, compose_poses, cone, cylinder, plane, pose_matrices
 
 __all__ = ["NewtonRenderer"]
 
 _GEO = newton.GeoType
 _FALLBACK_COLOR = (0.62, 0.64, 0.70)
-_GROUND_COLOR = (0.30, 0.33, 0.38)
+# The ground is a checkerboard of these two, one repeat per _GROUND_TILE metres (so cells are half that).
+_GROUND_COLORS = ((0.30, 0.33, 0.38), (0.40, 0.43, 0.48))
+_GROUND_TILE = 2.0
 # What the Newton viewer uses for a plane with no size ("infinite").
 _INFINITE_PLANE = 1000.0
 _UP = {0: (1.0, 0.0, 0.0), 1: (0.0, 1.0, 0.0), 2: (0.0, 0.0, 1.0)}
@@ -69,7 +71,7 @@ def _shape_mesh(builder: SceneBuilder, geo: int, scale: np.ndarray, source: obje
         width = s[0] if s[0] > 0.0 else _INFINITE_PLANE
         length = s[1] if len(s) > 1 and s[1] > 0.0 else _INFINITE_PLANE
         # Radius 0: a plane is the world, not the subject, so it does not count when framing the scene.
-        return builder.mesh(("plane", width, length), lambda: plane(width, length), 0.0), one
+        return builder.mesh(("plane", width, length), lambda: plane(width, length, _GROUND_TILE), 0.0), one
     if geo in (_GEO.MESH, _GEO.CONVEX_MESH) and source is not None:
         # A source mesh is shared by every shape using it, whatever its scale; the scale
         # (possibly negative, which mirrors it) goes on the instance.
@@ -87,6 +89,7 @@ class NewtonRenderer(SimRenderer):
         model: A finalized Newton model.
         width, height: Image size in pixels.
         lights: Lights to use. By default a key and a fill light are placed from the scene's size.
+        ambient: Light that reaches every surface regardless of the lights, as a fraction of its colour.
         world_offsets: Optional ``(world_count, 3)`` offsets, so the worlds of a batched
             simulation sit side by side instead of on top of each other.
         fov: Vertical field of view of the default camera, in radians.
@@ -94,7 +97,7 @@ class NewtonRenderer(SimRenderer):
 
     def __init__(self, model: newton.Model, width: int = 1280, height: int = 720, *,
                  lights: Sequence[Light] | None = None, world_offsets: np.ndarray | None = None,
-                 fov: float = 1.0) -> None:
+                 fov: float = 1.0, ambient: float = 0.2) -> None:
         shape_type = model.shape_type.numpy()
         shape_scale = model.shape_scale.numpy()
         flags = model.shape_flags.numpy()
@@ -114,8 +117,10 @@ class NewtonRenderer(SimRenderer):
                 skipped.add(_GEO(geo).name)
                 continue
             mesh_index, scale = made
-            color = colors[s] if colors is not None else (_GROUND_COLOR if geo == _GEO.PLANE else _FALLBACK_COLOR)
-            builder.add(mesh_index, color)
+            if geo == _GEO.PLANE:  # a checkerboard whatever the model's colour, so the ground shows scale and motion
+                builder.add(mesh_index, (1.0, 1.0, 1.0), builder.texture("ground", lambda: checker_texture(*_GROUND_COLORS)))
+            else:
+                builder.add(mesh_index, colors[s] if colors is not None else _FALLBACK_COLOR)
             keep.append(s)
             scales.append(scale)
             meshes_used.append(mesh_index)
@@ -137,7 +142,7 @@ class NewtonRenderer(SimRenderer):
         reach = np.array([builder.radius[m] for m in meshes_used]) * np.abs(self._scale).max(axis=1, initial=0.0)
         center, extent = scene_bounds(matrices[:, :, 3][reach > 0], reach[reach > 0])
         super().__init__(width, height, builder, up=_UP[int(model.up_axis)], center=center, extent=extent,
-                         lights=lights, fov=fov)
+                         lights=lights, fov=fov, ambient=ambient)
         self.renderer.set_instance_transforms(matrices)
 
     def _matrices(self, body_q: np.ndarray | None) -> np.ndarray:
