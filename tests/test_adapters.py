@@ -212,6 +212,87 @@ class TestNewton:
         hit = view.cast_rays(origin, direction)
         assert hit["object_id"][0] == sphere_id and hit["distance"][0] == pytest.approx(6.5, abs=1e-3)
 
+    # ------------------------------------------------------------ batched worlds --
+
+    def one_world(self, wp, builder_cls):
+        one = builder_cls()
+        for i, (shape, y) in enumerate([("sphere", 0.0), ("box", 1.2)]):
+            body = one.add_body(xform=wp.transform(p=wp.vec3(0.0, y, 1.0 + 0.2 * i), q=wp.quat_identity()))
+            if shape == "sphere":
+                one.add_shape_sphere(body, radius=0.4)
+            else:
+                one.add_shape_box(body, hx=0.3, hy=0.3, hz=0.3)
+        return one
+
+    def test_batch_views_match_the_single_world_adapter(self, nt, gpu):
+        from neraulgraphics.newton import NewtonBatchRenderer, NewtonRenderer
+        newton, wp = nt
+        worlds = 4
+        one = self.one_world(wp, newton.ModelBuilder)
+        many = newton.ModelBuilder()
+        many.add_ground_plane()
+        many.replicate(one, world_count=worlds)
+        model = many.finalize()
+
+        # A different pose in every world, so a view showing the wrong world's would be caught.
+        state = model.state()
+        q = state.body_q.numpy()
+        rng = np.random.default_rng(1)
+        q[:, 0] += rng.uniform(-0.5, 0.5, len(q))
+        q[:, 2] += rng.uniform(0.0, 0.8, len(q))
+        state.body_q.assign(q)
+
+        batch = NewtonBatchRenderer(model, W, H, lights=LIGHTS, ambient=0.0)
+        cam = batch.default_cameras()[:1]
+        out = batch.render(state, np.tile(cam, (worlds, 1, 1)), depth=True, object_ids=True)
+        assert out["rgb"].shape == (worlds, H, W, 3)
+        for w in range(worlds):
+            # The same world on its own: ground plus its two bodies, drawn by the single-world adapter.
+            solo_builder = newton.ModelBuilder()
+            solo_builder.add_ground_plane()
+            solo_builder.replicate(one, world_count=1)
+            solo = solo_builder.finalize()
+            solo_state = solo.state()
+            solo_state.body_q.assign(q[2 * w:2 * w + 2])
+            view = NewtonRenderer(solo, W, H, lights=LIGHTS, ambient=0.0)
+            eye = cam[0, :, 3]
+            single = view.render_frame(solo_state, view.camera(tuple(eye), tuple(eye - cam[0, :, 2])), depth=True, object_ids=True)
+            ids_batch = out["object_ids"][w]
+            ids_single = single["object_ids"]
+            # Ground, sphere, box: three kinds of object, numbered the same way in both.
+            assert (ids_batch != ids_single).mean() < 0.002, f"world {w}"
+            both = (ids_batch == ids_single) & np.isfinite(out["depth"][w]) & np.isfinite(single["depth"])
+            assert np.abs(out["depth"][w][both] - single["depth"][both]).max() < 0.02
+
+    def test_batch_takes_the_warp_state_as_it_is(self, nt, gpu):
+        from neraulgraphics.newton import NewtonBatchRenderer
+        newton, wp = nt
+        one = self.one_world(wp, newton.ModelBuilder)
+        many = newton.ModelBuilder()
+        many.replicate(one, world_count=8)
+        model = many.finalize()
+        batch = NewtonBatchRenderer(model, W, H, lights=LIGHTS)
+        state = model.state()
+        before = batch.render(state, object_ids=True, rgb=False)["object_ids"].copy()
+        moved = state.body_q.numpy()
+        moved[:, 1] += 3.0
+        state.body_q.assign(moved)  # the Warp array is passed to the renderer as it is
+        after = batch.render(state, object_ids=True, rgb=False)["object_ids"]
+        assert not np.array_equal(before, after)
+        assert (before >= ng.OBJECT_INSTANCE).any()
+
+    def test_batch_rejects_worlds_that_differ(self, nt, gpu):
+        from neraulgraphics.newton import NewtonBatchRenderer
+        newton, wp = nt
+        builder = newton.ModelBuilder()
+        for world, radius in enumerate([0.3, 0.5]):
+            builder.begin_world()
+            body = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 0.0, 1.0), q=wp.quat_identity()))
+            builder.add_shape_sphere(body, radius=radius)
+            builder.end_world()
+        with pytest.raises(ValueError, match="differs from world 0"):
+            NewtonBatchRenderer(builder.finalize(), W, H)
+
     def test_up_axis_is_respected(self, nt, gpu):
         from neraulgraphics.newton import NewtonRenderer
         newton, wp = nt
@@ -317,6 +398,37 @@ class TestMuJoCo:
         assert out["depth"][H // 2, W // 2] == pytest.approx(4.5, abs=0.05)
         hit = view.cast_rays(np.array([[2.0, -5.0, 0.3]], dtype=np.float32), np.array([[0, 1, 0]], dtype=np.float32))
         assert hit["object_id"][0] == ids[2] and hit["distance"][0] == pytest.approx(4.7, abs=1e-3)
+
+    def test_mjwarp_batch_matches_the_single_world_adapter(self, mj, gpu):
+        wp = pytest.importorskip("warp")
+        mjw = pytest.importorskip("mujoco_warp")
+        from neraulgraphics.mujoco import MJWarpBatchRenderer, MuJoCoRenderer
+        wp.config.quiet = True
+        m, d = self.model(mj, '<geom type="plane" size="0 0 0.1"/><body pos="0 0 1"><freejoint/><geom type="sphere" size="0.4" rgba="1 0 0 1"/></body>'
+                              '<body pos="1.2 0 1"><freejoint/><geom type="box" size="0.25 0.25 0.25" rgba="0 1 0 1"/></body>')
+        worlds = 3
+        model, data = mjw.put_model(m), mjw.put_data(m, d, nworld=worlds)
+        # A different pose in every world.
+        qpos = data.qpos.numpy()
+        qpos[:, 0] += np.array([0.0, 0.4, -0.3])
+        qpos[:, 9] += np.array([0.0, 0.3, 0.5])
+        data.qpos.assign(qpos)
+        mjw.forward(model, data)
+
+        batch = MJWarpBatchRenderer(m, worlds, W, H, lights=LIGHTS, ambient=0.0)
+        cams = batch.default_cameras()
+        out = batch.render(data, cams, depth=True, object_ids=True)
+        assert out["rgb"].shape == (worlds, H, W, 3)
+        single = MuJoCoRenderer(m, W, H, lights=LIGHTS, ambient=0.0)
+        for w in range(worlds):
+            native = mj.MjData(m)
+            native.qpos[:] = qpos[w]
+            mj.mj_forward(m, native)
+            eye = cams[w, :, 3]
+            ref = single.render_frame(native, single.camera(tuple(eye), tuple(eye - cams[w, :, 2])), depth=True, object_ids=True)
+            assert (ref["object_ids"] != out["object_ids"][w]).mean() < 0.002, f"world {w}"
+            both = (ref["object_ids"] == out["object_ids"][w]) & np.isfinite(ref["depth"]) & np.isfinite(out["depth"][w])
+            assert np.abs(ref["depth"][both] - out["depth"][w][both]).max() < 0.02
 
     def test_follows_the_simulation(self, mj, gpu):
         from neraulgraphics.mujoco import MuJoCoRenderer

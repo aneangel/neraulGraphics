@@ -19,6 +19,7 @@
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
+#include <neraulgraphics/batch.h>
 #include <neraulgraphics/renderer.h>
 
 namespace nb = nanobind;
@@ -217,6 +218,79 @@ nb::dict render_frame(nb::handle self_object, PyRenderer &self, const Camera &ca
     if (depth) result["depth"] = view(self_object, f.depth, {h, w}, f.memory, f.device_id);
     if (normals) result["normals"] = view(self_object, f.normal, {h, w, 3}, f.memory, f.device_id);
     if (object_ids) result["object_ids"] = view(self_object, f.object_id, {h, w}, f.memory, f.device_id);
+    return result;
+}
+
+
+// ------------------------------------------------------------------ batched worlds --
+
+struct PyBatch {
+    BatchRenderer renderer;
+    std::mutex mutex;
+
+    PyBatch(const int width, const int height, const int worlds, const int cameras_per_world,
+        const std::vector<Sphere> &spheres, const std::vector<Light> &lights, const Plane &floor,
+        const std::vector<Mesh> &meshes, const std::vector<Instance> &instances, const std::vector<Texture> &textures,
+        const Device device)
+        : renderer(width, height, worlds, cameras_per_world, spheres, lights, floor, meshes, instances, textures, device) {}
+};
+
+// A float array on any device: a NumPy array, or a CUDA array from PyTorch, Warp, JAX or CuPy.
+using AnyFloats = nb::ndarray<const float, nb::c_contig>;
+
+Memory memory_of(const AnyFloats &a, const char *what) {
+    if (a.device_type() == nb::device::cpu::value) return Memory::Host;
+    if (a.device_type() == nb::device::cuda::value) return Memory::Device;
+    throw std::invalid_argument(std::string(what) + " must be on the CPU or on a CUDA GPU");
+}
+
+size_t count_of(const AnyFloats &a) {
+    size_t n = 1;
+    for (size_t i = 0; i < a.ndim(); ++i) n *= a.shape(i);
+    return n;
+}
+
+void require_count(const AnyFloats &a, const size_t expected, const char *what, const std::string &shape) {
+    if (count_of(a) != expected)
+        throw std::invalid_argument(std::string(what) + " has " + std::to_string(count_of(a)) + " values, but " +
+            std::to_string(expected) + " are needed: " + shape);
+}
+
+nb::dict batch_frame(nb::handle owner, PyBatch &self, const AnyFloats &cameras, const float fov, const int spp,
+    const bool rgb, const bool depth, const bool normals, const bool object_ids, const int frame, const bool zero_copy) {
+    const unsigned outputs = (rgb ? OUTPUT_RGB : 0u) | (depth ? OUTPUT_DEPTH : 0u) | (normals ? OUTPUT_NORMAL : 0u) |
+        (object_ids ? OUTPUT_OBJECT_ID : 0u);
+    const size_t views = static_cast<size_t>(self.renderer.view_count());
+    require_count(cameras, views * 12, "cameras", std::to_string(views) + " cameras of 3 x 4 numbers (camera-to-world)");
+    const Memory camera_memory = memory_of(cameras, "cameras");
+    nb::dict result;
+    if (!zero_copy) {
+        if (camera_memory == Memory::Device)
+            throw std::invalid_argument("cameras on the GPU need zero_copy=True: the results then stay on the GPU too");
+        HostBatchFrame f;
+        {
+            nb::gil_scoped_release release;
+            std::lock_guard<std::mutex> lock(self.mutex);
+            f = self.renderer.render_host(cameras.data(), fov, spp, outputs, frame);
+        }
+        const size_t v = views, h = static_cast<size_t>(f.height), w = static_cast<size_t>(f.width);
+        if (rgb) result["rgb"] = own(std::move(f.rgb), {v, h, w, 3});
+        if (depth) result["depth"] = own(std::move(f.depth), {v, h, w});
+        if (normals) result["normals"] = own(std::move(f.normal), {v, h, w, 3});
+        if (object_ids) result["object_ids"] = own(std::move(f.object_id), {v, h, w});
+        return result;
+    }
+    BatchFrame f;
+    {
+        nb::gil_scoped_release release;
+        std::lock_guard<std::mutex> lock(self.mutex);
+        f = self.renderer.render(cameras.data(), fov, spp, outputs, frame, camera_memory);
+    }
+    const size_t v = views, h = static_cast<size_t>(f.height), w = static_cast<size_t>(f.width);
+    if (rgb) result["rgb"] = view(owner, f.rgb, {v, h, w, 3}, f.memory, f.device_id);
+    if (depth) result["depth"] = view(owner, f.depth, {v, h, w}, f.memory, f.device_id);
+    if (normals) result["normals"] = view(owner, f.normal, {v, h, w, 3}, f.memory, f.device_id);
+    if (object_ids) result["object_ids"] = view(owner, f.object_id, {v, h, w}, f.memory, f.device_id);
     return result;
 }
 
@@ -468,6 +542,139 @@ NB_MODULE(_core, m) {
         "world_up"_a = Vec3{0.0f, 1.0f, 0.0f}, "fov"_a = 1.5707964f,
         "A camera at position looking at target. width and height give the aspect ratio; "
         "fov is the vertical field of view in radians.");
+
+
+    nb::class_<PyBatch>(m, "BatchRenderer",
+        "Many worlds rendered at once, for reinforcement learning: thousands of copies of one environment, "
+        "each seen by its own camera(s), drawn in one call.\n\n"
+        "All worlds share the meshes, textures, lights, spheres and floor. Each holds the same list of "
+        "instances, placed differently, and a camera sees only its own world's. The images come back as one "
+        "batch, (views, height, width, ...). Poses, cameras and rays can be NumPy arrays or CUDA arrays "
+        "(PyTorch tensors and the like), in which case nothing is copied.")
+        .def("__init__",
+            [](PyBatch *self, const int width, const int height, const int world_count, const int cameras_per_world,
+                const std::vector<Sphere> &spheres, const std::vector<Light> &lights, const Plane &floor,
+                const std::vector<Mesh> &meshes, const std::vector<Instance> &instances,
+                const std::vector<Texture> &textures, const std::string &device) {
+                new (self) PyBatch(width, height, world_count, cameras_per_world, spheres, lights, floor, meshes,
+                    instances, textures, parse_device(device));
+            },
+            "width"_a, "height"_a, "world_count"_a, "cameras_per_world"_a = 1, "spheres"_a = std::vector<Sphere>{},
+            "lights"_a = std::vector<Light>{}, "floor"_a = Plane{}, "meshes"_a = std::vector<Mesh>{},
+            "instances"_a = std::vector<Instance>{}, "textures"_a = std::vector<Texture>{}, "device"_a = "auto",
+            "instances: what one world holds, as Instance objects (their transforms are where every world "
+            "starts). Views are numbered world-major: view v looks at world v // cameras_per_world.")
+        .def("set_instance_transforms",
+            [](PyBatch &self, const AnyFloats &matrices) {
+                const size_t expected = static_cast<size_t>(self.renderer.world_count()) * self.renderer.instances_per_world() * 12;
+                require_count(matrices, expected, "matrices", "(world_count, instances_per_world, 3, 4), the top three rows of each 4x4");
+                const Memory memory = memory_of(matrices, "matrices");
+                nb::gil_scoped_release release;
+                std::lock_guard<std::mutex> lock(self.mutex);
+                self.renderer.set_instance_transforms(matrices.data(), memory);
+            },
+            "matrices"_a,
+            "Place every instance of every world: a (world_count, instances_per_world, 3, 4) float32 array, the "
+            "top three rows of each 4x4 transform. A CUDA array is used where it is, and the trees over the "
+            "instances are rebuilt on the GPU (0.15 ms for 80,000 instances); it is not checked, since checking "
+            "would copy it back, so keep it finite and invertible. A NumPy array is checked first.")
+        .def("bind_bodies",
+            [](PyBatch &self, nb::ndarray<const int32_t, nb::c_contig, nb::device::cpu> body_of_instance,
+                nb::ndarray<const float, nb::c_contig, nb::device::cpu> local_pose,
+                nb::ndarray<const float, nb::c_contig, nb::device::cpu> scale, const int bodies_per_world) {
+                BodyBinding b;
+                b.bodies_per_world = bodies_per_world;
+                b.body_of_instance.assign(body_of_instance.data(), body_of_instance.data() + body_of_instance.size());
+                b.local_pose.assign(local_pose.data(), local_pose.data() + local_pose.size());
+                b.scale.assign(scale.data(), scale.data() + scale.size());
+                std::lock_guard<std::mutex> lock(self.mutex);
+                self.renderer.bind_bodies(b);
+            },
+            "body_of_instance"_a, "local_pose"_a, "scale"_a, "bodies_per_world"_a,
+            "Say how simulator bodies carry the instances, once. For each instance of a world: body_of_instance "
+            "(the index of its body within the world, or -1 for fixed in the world), local_pose (x, y, z, then "
+            "a quaternion x, y, z, w: where it sits on the body) and scale (x, y, z, along the mesh's own axes). "
+            "Then set_body_poses places everything from the simulation's state.")
+        .def("set_body_poses",
+            [](PyBatch &self, const AnyFloats &poses) {
+                const Memory memory = memory_of(poses, "body poses");
+                nb::gil_scoped_release release;
+                std::lock_guard<std::mutex> lock(self.mutex);
+                self.renderer.set_body_poses(poses.data(), memory);
+            },
+            "body_poses"_a,
+            "Place every instance of every world from body poses: (world_count, bodies_per_world, 7) floats, x, y, "
+            "z then a quaternion x, y, z, w, world-major, which is how simulators hold them. A CUDA array (such "
+            "as a simulator's state array) is used where it is, as one kernel.")
+        .def("render",
+            [](PyBatch &self, const AnyFloats &cameras, const float fov, const int spp, const bool rgb, const bool depth,
+                const bool normals, const bool object_ids, const int frame, const bool zero_copy) {
+                return batch_frame(nb::find(&self), self, cameras, fov, spp, rgb, depth, normals, object_ids, frame, zero_copy);
+            },
+            "cameras"_a, "fov"_a = 1.0f, "samples_per_pixel"_a = 1, nb::kw_only(), "rgb"_a = true, "depth"_a = false,
+            "normals"_a = false, "object_ids"_a = false, "frame"_a = 0, "zero_copy"_a = false,
+            "Render every view and return the images you ask for as a dict: 'rgb' (views, H, W, 3) uint8, 'depth' "
+            "(views, H, W) float32, 'normals' (views, H, W, 3) float32 and 'object_ids' (views, H, W) int32; see "
+            "Renderer.render_frame for what each holds.\n\n"
+            "cameras: (views, 3, 4) camera-to-world matrices in the OpenGL convention (x right, y up, looking "
+            "along -z), so the matrix of a robot's head link works as it is; fov is the vertical field of view in "
+            "radians, shared by every camera. frame only varies the sampling noise.\n\n"
+            "With zero_copy=True the images are views of the renderer's buffers, CUDA arrays on a GPU (for "
+            "torch.from_dlpack and the like), overwritten by the next render; cameras may then be CUDA arrays as well.")
+        .def("cast_rays",
+            [](PyBatch &self, const AnyFloats &origins, const AnyFloats &directions, const float max_distance) {
+                const size_t worlds = static_cast<size_t>(self.renderer.world_count());
+                if (count_of(origins) % (3 * worlds) != 0)
+                    throw std::invalid_argument("origins must hold 3 floats for each ray of each of the " + std::to_string(worlds) +
+                        " worlds: (world_count, rays_per_world, 3)");
+                require_count(directions, count_of(origins), "directions", "the same as origins");
+                const int rays_per_world = static_cast<int>(count_of(origins) / (3 * worlds));
+                const Memory memory = memory_of(origins, "origins");
+                if (memory_of(directions, "directions") != memory)
+                    throw std::invalid_argument("origins and directions must be on the same device");
+                const size_t n = static_cast<size_t>(rays_per_world), w = worlds;
+                if (memory == Memory::Host) {
+                    HostRayHits hits;
+                    {
+                        std::vector<float> o(origins.data(), origins.data() + count_of(origins));
+                        std::vector<float> d(directions.data(), directions.data() + count_of(directions));
+                        nb::gil_scoped_release release;
+                        std::lock_guard<std::mutex> lock(self.mutex);
+                        hits = self.renderer.cast_rays_host(o, d, rays_per_world, max_distance);
+                    }
+                    nb::dict result;
+                    result["distance"] = own(std::move(hits.distance), {w, n});
+                    result["normal"] = own(std::move(hits.normal), {w, n, 3});
+                    result["object_id"] = own(std::move(hits.object_id), {w, n});
+                    return result;
+                }
+                RayHits hits;
+                {
+                    nb::gil_scoped_release release;
+                    std::lock_guard<std::mutex> lock(self.mutex);
+                    hits = self.renderer.cast_rays(origins.data(), directions.data(), rays_per_world, max_distance, Memory::Device);
+                }
+                nb::dict result;
+                result["distance"] = view(nb::find(&self), hits.distance, {w, n}, hits.memory, hits.device_id);
+                result["normal"] = view(nb::find(&self), hits.normal, {w, n, 3}, hits.memory, hits.device_id);
+                result["object_id"] = view(nb::find(&self), hits.object_id, {w, n}, hits.memory, hits.device_id);
+                return result;
+            },
+            "origins"_a, "directions"_a, "max_distance"_a = std::numeric_limits<float>::infinity(),
+            "Cast rays in every world: origins and directions are (world_count, rays_per_world, 3) float arrays. "
+            "Returns distance (world_count, rays_per_world), normal (..., 3) and object_id, as Renderer.cast_rays "
+            "does; each ray sees only its own world's instances. CUDA arrays in give CUDA arrays out, with no copy.")
+        .def_prop_ro("width", [](PyBatch &self) { return self.renderer.width(); })
+        .def_prop_ro("height", [](PyBatch &self) { return self.renderer.height(); })
+        .def_prop_ro("world_count", [](PyBatch &self) { return self.renderer.world_count(); })
+        .def_prop_ro("cameras_per_world", [](PyBatch &self) { return self.renderer.cameras_per_world(); })
+        .def_prop_ro("view_count", [](PyBatch &self) { return self.renderer.view_count(); })
+        .def_prop_ro("instances_per_world", [](PyBatch &self) { return self.renderer.instances_per_world(); })
+        .def_prop_ro("device", [](PyBatch &self) { return self.renderer.device() == Device::Cuda ? "cuda" : "cpu"; })
+        .def_prop_ro("last_kernel_ms", [](PyBatch &self) { return self.renderer.last_kernel_ms(); })
+        .def_prop_rw("ambient", [](PyBatch &self) { return self.renderer.ambient(); },
+            [](PyBatch &self, const float a) { self.renderer.set_ambient(a); },
+            "Light that reaches every surface regardless of the lights: see Renderer.ambient.");
 
     nb::class_<PyRenderer>(m, "Renderer",
         "One scene and its frame buffers on the GPU. Safe to share between threads.")

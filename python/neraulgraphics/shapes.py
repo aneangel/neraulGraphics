@@ -13,8 +13,8 @@ import numpy as np
 
 from ._core import Mesh, Texture
 
-__all__ = ["capsule", "checker_texture", "compose_poses", "cone", "cylinder", "plane", "pose_matrices", "quat_to_matrix",
-           "uv_sphere"]
+__all__ = ["capsule", "checker_texture", "compose_poses", "cone", "cylinder", "look_at", "plane", "pose_matrices",
+           "quat_to_matrix", "uv_sphere"]
 
 
 def _revolve(profile: np.ndarray, segments: int) -> Mesh:
@@ -121,6 +121,26 @@ def checker_texture(color_a=(0.30, 0.33, 0.38), color_b=(0.40, 0.43, 0.48), size
     image[:half, :half] = image[half:, half:] = a
     image[:half, half:] = image[half:, :half] = b
     return Texture(image)
+
+
+def look_at(eye: np.ndarray, target: np.ndarray, up=(0.0, 0.0, 1.0)) -> np.ndarray:
+    """Camera-to-world matrices ``(N, 3, 4)`` of cameras at ``eye`` looking at ``target``, for ``BatchRenderer.render``.
+
+    The convention is OpenGL's: x right, y up, looking along -z. ``eye`` and ``target`` are ``(3,)`` or
+    ``(N, 3)`` and broadcast together; ``up`` is the world's up axis (Z for Newton and MuJoCo, Y for glTF).
+    """
+    eye, target = np.broadcast_arrays(np.atleast_2d(np.asarray(eye, np.float64)), np.atleast_2d(np.asarray(target, np.float64)))
+    forward = target - eye
+    forward /= np.linalg.norm(forward, axis=1, keepdims=True)
+    right = np.cross(forward, np.asarray(up, np.float64))
+    norm = np.linalg.norm(right, axis=1, keepdims=True)
+    if (norm < 1e-9).any():
+        raise ValueError("a camera looks along the up axis, so its right direction is undefined; move the eye or change up")
+    right /= norm
+    true_up = np.cross(right, forward)
+    out = np.empty((len(eye), 3, 4), dtype=np.float32)
+    out[:, :, 0], out[:, :, 1], out[:, :, 2], out[:, :, 3] = right, true_up, -forward, eye
+    return out
 
 
 def quat_to_matrix(q: np.ndarray) -> np.ndarray:

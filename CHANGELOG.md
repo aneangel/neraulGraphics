@@ -9,6 +9,16 @@ version (0.x.0) may change the API.
 ## [Unreleased]
 
 ### Added
+- Batched worlds. `BatchRenderer` draws many worlds at once, each seen by its own camera(s) and
+  holding the same instances placed differently, and returns `(views, H, W, ...)` batches of RGB,
+  depth, normals and object IDs. Poses (`set_instance_transforms`, or simulator body poses through
+  `bind_bodies` and `set_body_poses`), cameras and rays may be CUDA arrays, used where they are.
+  Worlds are isolated: a camera never sees another world's instances.
+- The trees over instances are built on the GPU every update (Morton-code sort and parallel Karras
+  construction): 82,000 instances in 0.15 ms and 100,000 in under 1 ms, against 89 ms when built on the CPU.
+  The layout is now a forest with explicit child pointers, one root per world.
+- `NewtonBatchRenderer` and `MJWarpBatchRenderer`: batched Newton and MuJoCo Warp simulations, reading the
+  simulators' GPU state in place. `neraulgraphics.shapes.look_at` makes camera matrices.
 - Sensor outputs. `Renderer.render_frame(camera, rgb=, depth=, normals=, object_ids=)` returns depth
   (along the view axis, `inf` where nothing is hit), world-space normals and object-ID images, each
   one exact ray through the pixel's middle. IDs are fixed numbers: `OBJECT_NONE`, `OBJECT_SPHERE + i`,

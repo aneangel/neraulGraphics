@@ -16,6 +16,7 @@ sharpens the longer the camera holds still.
 - **Library first.** `pip install` and `import neraulgraphics`, or `find_package(neraulgraphics)` in C++. No window or engine to adopt.
 - **Meshes and instancing.** Share triangle meshes between any number of instances. Moving an instance only updates a small BVH, so thousands of moving bodies stay cheap.
 - **Dynamic scenes.** `set_instance_transforms()` takes a pose per instance each frame, with poses as position plus `(x, y, z, w)` quaternion, the convention Warp, MuJoCo and Newton use.
+- **Thousands of worlds at once.** `BatchRenderer` draws many independent worlds, each with its own camera, in one call: over a million 64x64 images a second, with poses straight from the simulator's GPU state and images straight to the policy.
 - **Sensors for robotics and RL.** Depth, surface-normal and object-ID (segmentation) images, and ray queries for LiDAR and range sensors, handed to PyTorch, JAX or Warp on the GPU with no copy.
 - **Load models.** `ng.load("model.glb")` reads glTF, GLB and OBJ with materials, colour textures, smooth normals and node hierarchies.
 - **Newton and MuJoCo adapters.** `NewtonRenderer(model).render(state)` and `MuJoCoRenderer(model).render(data)`: shapes become instances once, and each frame only poses are updated.
@@ -61,6 +62,32 @@ for frame in range(64):                  # more frames, smoother image
 
 Move things every frame with `renderer.set_instance_transforms(matrices)`, an
 `(N, 3, 4)` float array, then render with `frame=0`.
+
+## Thousands of worlds for reinforcement learning
+
+```python
+renderer = ng.BatchRenderer(64, 64, world_count=4096, meshes=meshes, instances=robot_and_objects, lights=lights)
+renderer.set_instance_transforms(poses)                    # (4096, instances, 3, 4): NumPy, or a CUDA tensor
+images = renderer.render(cameras, fov=1.0, depth=True, zero_copy=True)   # (4096, 64, 64, ...) CUDA tensors
+```
+
+Every world holds the same instances, placed differently, and a camera sees only its own world, so worlds
+can overlap in space as simulators leave them. Poses, cameras and rays can be CUDA arrays and are used where
+they are; the trees over the instances are rebuilt on the GPU every update (0.15 ms for 80,000 instances), and
+`set_body_poses` composes a simulator's body poses with each shape's offset and scale in one kernel. On an RTX
+5090, 4,096 worlds at 128x128 (RGB, depth and object IDs, with new poses every step) take about 6 ms, and at
+64x64 a million images a second. The adapters do this for the simulators directly:
+
+```python
+from neraulgraphics.newton import NewtonBatchRenderer           # Newton, after builder.replicate(robot, world_count=N)
+from neraulgraphics.mujoco import MJWarpBatchRenderer           # MuJoCo Warp, with nworld=N
+
+view = NewtonBatchRenderer(model, 64, 64)
+images = view.render(state, depth=True, zero_copy=True)          # state.body_q is read where it is, on the GPU
+```
+
+See [examples/batch_render.py](https://github.com/aneangel/neraulGraphics/blob/main/examples/batch_render.py)
+for the whole data path with PyTorch.
 
 ## Sensors: depth, segmentation, LiDAR
 

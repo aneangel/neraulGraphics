@@ -124,6 +124,7 @@ public:
 
     // Light that reaches every surface regardless of the lights: see Renderer::set_ambient.
     void set_ambient(float ambient);
+    float ambient() const;
 
 private:
     struct Impl;

@@ -34,7 +34,7 @@ from ._adapter import SceneBuilder, SimRenderer, scene_bounds
 from ._core import Light, Mesh
 from .shapes import capsule, checker_texture, cylinder, matrices_from_rotations, plane
 
-__all__ = ["MuJoCoRenderer"]
+__all__ = ["MJWarpBatchRenderer", "MuJoCoRenderer"]
 
 _GEOM = mujoco.mjtGeom
 _DEFAULT_RGBA = np.array([0.5, 0.5, 0.5, 1.0], dtype=np.float32)
@@ -172,3 +172,152 @@ class MuJoCoRenderer(SimRenderer):
         increasing ``frame`` sharpens the image.
         """
         return self._render(self._matrices(data), camera, frame, samples_per_frame)
+
+
+class MJWarpBatchRenderer:
+    """Draws `MuJoCo Warp <https://github.com/google-deepmind/mujoco_warp>`_ worlds: thousands at once, each with its own camera.
+
+    ::
+
+        import mujoco_warp as mjw
+        model, data = mjw.put_model(mjm), mjw.make_data(mjm, nworld=4096)
+        view = MJWarpBatchRenderer(mjm, 4096, 64, 64)
+        ...
+        mjw.step(model, data)
+        images = view.render(data, depth=True, zero_copy=True)   # CUDA arrays, ready for a policy
+
+    The geoms of the model become instances once. Each ``render`` reads ``data.geom_xpos`` and
+    ``data.geom_xmat``, which live on the GPU, composes them with each geom's size in one Warp kernel, and
+    hands the result to the renderer: nothing passes through the CPU. A camera sees only its own world.
+
+    Args:
+        model: The compiled MuJoCo model the Warp model was made from.
+        world_count: The ``nworld`` of the Warp data.
+        width, height: Size of each view in pixels.
+        cameras_per_world: Cameras looking at each world.
+        geom_groups, lights, fov, ambient, device: As for :class:`MuJoCoRenderer`.
+    """
+
+    _kernel = None
+
+    def __init__(self, model: mujoco.MjModel, world_count: int, width: int = 128, height: int = 128,
+                 cameras_per_world: int = 1, *, geom_groups: Collection[int] = (0, 1, 2),
+                 lights: Sequence[Light] | None = None, fov: float = 1.0, ambient: float = 0.2,
+                 device: str = "auto") -> None:
+        import warp as wp
+        from ._adapter import SceneBuilder, _material
+        from ._core import BatchRenderer, Instance, Transform
+        from .shapes import look_at
+
+        builder = SceneBuilder()
+        geoms, instances, scales, radii = [], [], [], []
+        for g in range(model.ngeom):
+            rgba = model.geom_rgba[g]
+            if model.geom_group[g] not in geom_groups or rgba[3] <= 0.0:
+                continue
+            made = MuJoCoRenderer._geom_mesh(builder, model, g, int(model.geom_type[g]))
+            if made is None:
+                continue
+            mesh_index, scale, radius = made
+            if model.geom_matid[g] >= 0 and np.allclose(rgba, _DEFAULT_RGBA):
+                rgba = model.mat_rgba[model.geom_matid[g]]
+            texture = -1
+            color = rgba[:3]
+            if int(model.geom_type[g]) == _GEOM.mjGEOM_PLANE:
+                base = np.asarray(rgba[:3], dtype=np.float64)
+                texture = builder.texture(("ground", tuple(base)), lambda: checker_texture(base * 0.85, np.minimum(base * 1.15, 1.0)))
+                color = (1.0, 1.0, 1.0)
+            instances.append(Instance(mesh_index, Transform(np.eye(4, dtype=np.float32)), _material(color), texture))
+            geoms.append(g)
+            scales.append(scale)
+            radii.append(radius)
+        if not instances:
+            raise ValueError("the model has no visible geoms to draw")
+
+        self._worlds, self._cameras_per_world = int(world_count), cameras_per_world
+        self.width, self.height, self.fov = width, height, fov
+        self._geoms = np.asarray(geoms, np.int32)
+        reach = np.array(radii) * np.abs(np.asarray(scales)).max(axis=1)
+        probe = mujoco.MjData(model)
+        mujoco.mj_forward(model, probe)
+        solid = reach > 0
+        self.center, extent = scene_bounds(probe.geom_xpos[self._geoms][solid], reach[solid])
+        self.extent = max(extent, 1e-3)
+        self.up = np.array([0.0, 0.0, 1.0])
+
+        stub = SimRenderer.__new__(SimRenderer)
+        stub.up, stub.center, stub.extent = self.up, self.center, self.extent
+        self.renderer = BatchRenderer(width, height, self._worlds, cameras_per_world, [],
+                                      list(lights) if lights is not None else SimRenderer.default_lights(stub),
+                                      meshes=builder.meshes, instances=instances, textures=builder.textures, device=device)
+        self.renderer.ambient = ambient
+        self._look_at = look_at
+
+        self._warp = wp
+        self._scales = np.asarray(scales, np.float32).reshape(-1, 3)
+        self._wp_geoms = self._wp_scales = self._matrices = None
+
+    @property
+    def view_count(self) -> int:
+        return self._worlds * self._cameras_per_world
+
+    def default_cameras(self) -> np.ndarray:
+        """One camera per view, framing the scene from the side, slightly above: ``(views, 3, 4)``."""
+        eye = self.center - np.array([0.0, 1.0, 0.0]) * 2.6 * self.extent + self.up * 0.7 * self.extent
+        return np.tile(self._look_at(eye, self.center, self.up), (self.view_count, 1, 1))
+
+    @classmethod
+    def _compose(cls):
+        """The Warp kernel that turns geom poses into instance matrices, compiled the first time it is wanted."""
+        if cls._kernel is None:
+            import warp as wp
+
+            @wp.kernel
+            def compose(xpos: wp.array2d(dtype=wp.vec3), xmat: wp.array2d(dtype=wp.mat33), geoms: wp.array(dtype=wp.int32),
+                        scales: wp.array(dtype=wp.vec3), out: wp.array(dtype=wp.float32)):
+                w, i = wp.tid()
+                g = geoms[i]
+                p, r, s = xpos[w, g], xmat[w, g], scales[i]
+                base = (w * geoms.shape[0] + i) * 12
+                for row in range(3):
+                    out[base + 4 * row + 0] = r[row, 0] * s[0]
+                    out[base + 4 * row + 1] = r[row, 1] * s[1]
+                    out[base + 4 * row + 2] = r[row, 2] * s[2]
+                    out[base + 4 * row + 3] = p[row]
+
+            cls._kernel = compose
+        return cls._kernel
+
+    def update(self, data) -> None:
+        """Places every geom of every world from ``data.geom_xpos`` and ``data.geom_xmat`` (call ``mjw.forward`` or ``step`` first)."""
+        wp = self._warp
+        device = data.geom_xpos.device
+        if self._matrices is None or self._matrices.device != device:
+            self._wp_geoms = wp.array(self._geoms, dtype=wp.int32, device=device)
+            self._wp_scales = wp.array(self._scales, dtype=wp.vec3, device=device)
+            self._matrices = wp.empty(self._worlds * len(self._geoms) * 12, dtype=wp.float32, device=device)
+        wp.launch(self._compose(), dim=(self._worlds, len(self._geoms)),
+                  inputs=[data.geom_xpos, data.geom_xmat, self._wp_geoms, self._wp_scales, self._matrices], device=device)
+        # Handed over as the Warp array it is: read in place on a GPU. A renderer on the CPU gets the copy it needs.
+        self.renderer.set_instance_transforms(self._matrices.numpy() if self.renderer.device == "cpu" else self._matrices)
+
+    def render(self, data, cameras=None, *, fov: float | None = None, rgb: bool = True, depth: bool = False, normals: bool = False,
+               object_ids: bool = False, zero_copy: bool = False, frame: int = 0, samples_per_pixel: int = 1) -> dict:
+        """Draws every world of ``data``: a dict of ``rgb``, ``depth``, ``normals`` and ``object_ids`` batches.
+
+        See :meth:`neraulgraphics.newton.NewtonBatchRenderer.render`; the arguments are the same.
+        """
+        self.update(data)
+        return self.renderer.render(self.default_cameras() if cameras is None else cameras, self.fov if fov is None else fov,
+                                    samples_per_pixel, rgb=rgb, depth=depth, normals=normals, object_ids=object_ids,
+                                    frame=frame, zero_copy=zero_copy)
+
+    @property
+    def object_id_of_geom(self) -> dict[int, int]:
+        """Which object ID each drawn MuJoCo geom index has in an ``object_ids`` image or a ray query."""
+        from ._core import OBJECT_INSTANCE
+        return {int(geom): OBJECT_INSTANCE + i for i, geom in enumerate(self._geoms)}
+
+    def cast_rays(self, origins, directions, max_distance: float = float("inf")) -> dict:
+        """Ray queries in every world: ``(world_count, rays_per_world, 3)`` arrays. See :meth:`neraulgraphics.BatchRenderer.cast_rays`."""
+        return self.renderer.cast_rays(origins, directions, max_distance)

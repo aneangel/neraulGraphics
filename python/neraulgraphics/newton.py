@@ -34,7 +34,7 @@ from ._adapter import SceneBuilder, SimRenderer, scene_bounds
 from ._core import Light, Mesh
 from .shapes import capsule, checker_texture, compose_poses, cone, cylinder, plane, pose_matrices
 
-__all__ = ["NewtonRenderer"]
+__all__ = ["NewtonBatchRenderer", "NewtonRenderer"]
 
 _GEO = newton.GeoType
 _FALLBACK_COLOR = (0.62, 0.64, 0.70)
@@ -202,3 +202,169 @@ class NewtonRenderer(SimRenderer):
         """Which object ID each drawn Newton shape index has in an ``object_ids`` image or a ray query."""
         from ._core import OBJECT_INSTANCE
         return {int(shape): OBJECT_INSTANCE + i for i, shape in enumerate(self._shapes)}
+
+
+class NewtonBatchRenderer:
+    """Draws a batched Newton simulation: many worlds, each seen by its own camera(s), in one call.
+
+    ::
+
+        builder.replicate(robot, world_count=4096)         # identical worlds, as Newton batches them
+        model = builder.finalize()
+        view = NewtonBatchRenderer(model, 64, 64)
+        ...
+        solver.step(state_0, state_1, control, contacts, dt)
+        images = view.render(state_1, depth=True, zero_copy=True)
+
+    The shapes of one world become instances once; each ``render`` hands ``state.body_q`` to the renderer as
+    it is, so on a GPU the simulator's state goes to the images and the images to a policy without touching
+    the CPU. Every world must hold the same shapes on the same bodies, as ``replicate`` makes them (this is
+    checked); shapes that belong to no world, such as a ground plane, appear in every world. A camera
+    sees only its own world, so worlds that overlap in space (as Newton leaves them) do not show through one
+    another.
+
+    Args:
+        model: A finalized Newton model with ``world_count`` identical worlds.
+        width, height: Size of each view in pixels.
+        cameras_per_world: Cameras looking at each world.
+        lights, fov, ambient, device: As for :class:`NewtonRenderer`.
+    """
+
+    def __init__(self, model: newton.Model, width: int = 128, height: int = 128, cameras_per_world: int = 1, *,
+                 lights: Sequence[Light] | None = None, fov: float = 1.0, ambient: float = 0.2,
+                 device: str = "auto") -> None:
+        from ._core import BatchRenderer, Instance, Transform
+        from ._adapter import SceneBuilder, _material
+
+        worlds = int(model.world_count)
+        bodies = int(model.body_count)
+        if bodies % worlds:
+            raise ValueError(f"the model has {bodies} bodies in {worlds} worlds, which is not the same number in each")
+        per_world_bodies = bodies // worlds
+        if bodies and not np.array_equal(model.body_world.numpy(), np.repeat(np.arange(worlds), per_world_bodies)):
+            raise ValueError("the bodies are not stored world by world (all of world 0's, then world 1's, and so on)")
+
+        shape_type, shape_scale = model.shape_type.numpy(), model.shape_scale.numpy()
+        flags, shape_world = model.shape_flags.numpy(), model.shape_world.numpy()
+        shape_body, transform = model.shape_body.numpy(), model.shape_transform.numpy()
+        colors = model.shape_color.numpy() if model.shape_color is not None else None
+
+        builder = SceneBuilder()
+        # What each shape is, in a form two worlds can be compared by.
+        signatures: dict[int, list] = {}
+        entries: dict[int, list] = {}
+        for s in range(len(shape_type)):
+            if not flags[s] & int(newton.ShapeFlags.VISIBLE):
+                continue
+            made = _shape_mesh(builder, int(shape_type[s]), shape_scale[s], model.shape_source[s])
+            if made is None:
+                continue
+            w = int(shape_world[s])
+            body = int(shape_body[s])
+            local_body = body - w * per_world_bodies if (body >= 0 and w >= 0) else body
+            mesh_index, scale = made
+            color = colors[s] if colors is not None else _FALLBACK_COLOR
+            entries.setdefault(w, []).append((s, mesh_index, scale, local_body))
+            signatures.setdefault(w, []).append((mesh_index, tuple(np.round(scale, 5)), local_body,
+                                                 tuple(np.round(transform[s], 5)), tuple(np.round(color, 4)),
+                                                 int(shape_type[s])))
+        template = signatures.get(0, [])
+        for w in range(1, worlds):
+            if signatures.get(w, []) != template:
+                raise ValueError(f"world {w} differs from world 0 (its shapes, sizes, colours, bodies or offsets), "
+                                 "but a batch needs identical worlds, as Newton's replicate() makes them")
+
+        instances, body_of, local, scales = [], [], [], []
+        for w in (-1, 0):  # shapes that belong to no world, then the shapes of one world
+            for s, mesh_index, scale, local_body in entries.get(w, []):
+                is_plane = int(shape_type[s]) == _GEO.PLANE
+                texture = builder.texture("ground", lambda: checker_texture(*_GROUND_COLORS)) if is_plane else -1
+                color = (1.0, 1.0, 1.0) if is_plane else (colors[s] if colors is not None else _FALLBACK_COLOR)
+                instances.append(Instance(mesh_index, Transform(np.eye(4, dtype=np.float32)), _material(color), texture))
+                body_of.append(local_body)
+                local.append(transform[s])
+                scales.append(scale)
+        if not instances:
+            raise ValueError("the model has no visible shapes to draw")
+
+        self._worlds, self._cameras_per_world = worlds, cameras_per_world
+        self.width, self.height, self.fov = width, height, fov
+        self.up = np.asarray(_UP[int(model.up_axis)], dtype=np.float64)
+
+        # Where to look: the middle and size of the first world's shapes in the model's initial pose.
+        initial = model.body_q.numpy() if per_world_bodies else np.zeros((0, 7))
+        first = initial[:per_world_bodies]
+        positions, reach = [], []
+        for (s, mesh_index, scale, local_body), p_local in zip(entries.get(0, []), [transform[e[0]] for e in entries.get(0, [])]):
+            if local_body >= 0:
+                p, _ = compose_poses(first[local_body:local_body + 1, :3], first[local_body:local_body + 1, 3:7],
+                                     p_local[None, :3], p_local[None, 3:7])
+            else:
+                p = p_local[None, :3]
+            positions.append(p[0])
+            reach.append(builder.radius[mesh_index] * float(np.abs(scale).max()))
+        center, extent = scene_bounds(np.array(positions).reshape(-1, 3), np.array(reach))
+        self.center, self.extent = center, max(extent, 1e-3)
+
+        self.renderer = BatchRenderer(width, height, worlds, cameras_per_world, [], list(lights) if lights is not None else
+                                      self._default_lights(), meshes=builder.meshes, instances=instances,
+                                      textures=builder.textures, device=device)
+        self.renderer.ambient = ambient
+        self.renderer.bind_bodies(np.asarray(body_of, np.int32), np.asarray(local, np.float32).reshape(-1, 7),
+                                  np.asarray(scales, np.float32).reshape(-1, 3), per_world_bodies)
+        self._model = model
+        self._has_bodies = per_world_bodies > 0
+        self._pose_static()
+
+    def _default_lights(self) -> list[Light]:
+        stub = SimRenderer.__new__(SimRenderer)
+        stub.up, stub.center, stub.extent = self.up, self.center, self.extent
+        return SimRenderer.default_lights(stub)
+
+    def _pose_static(self) -> None:
+        # Worlds with no bodies (everything fixed) are placed once, from an empty set of poses.
+        if not self._has_bodies:
+            self.renderer.set_body_poses(np.zeros((self._worlds, 0, 7), np.float32))
+
+    @property
+    def view_count(self) -> int:
+        return self._worlds * self._cameras_per_world
+
+    def default_cameras(self) -> np.ndarray:
+        """One camera per view, framing the first world's shapes from the side, slightly above: ``(views, 3, 4)``."""
+        from .shapes import look_at
+        h = np.cross(self.up, np.cross([0.0, 1.0, 0.0] if abs(self.up[1]) < 0.9 else [1.0, 0.0, 0.0], self.up))
+        h /= np.linalg.norm(h)
+        eye = self.center - h * 2.6 * self.extent + self.up * 0.7 * self.extent
+        return np.tile(look_at(eye, self.center, self.up), (self.view_count, 1, 1))
+
+    def update(self, state: newton.State | None = None) -> None:
+        """Places every instance of every world from ``state`` (default: the model's initial pose)."""
+        if not self._has_bodies:
+            return
+        body_q = state.body_q if state is not None else self._initial_body_q()
+        # A Warp array: handed over as it is, so on a GPU it is read in place with no copy. A renderer on the CPU
+        # cannot read GPU memory, so it gets the copy it needs.
+        self.renderer.set_body_poses(body_q.numpy() if self.renderer.device == "cpu" else body_q)
+
+    def _initial_body_q(self):
+        return self._model.body_q
+
+    def render(self, state: newton.State, cameras=None, *, fov: float | None = None, rgb: bool = True, depth: bool = False,
+               normals: bool = False, object_ids: bool = False, zero_copy: bool = False, frame: int = 0,
+               samples_per_pixel: int = 1) -> dict:
+        """Draws every world of ``state``: a dict of ``rgb``, ``depth``, ``normals`` and ``object_ids`` batches.
+
+        ``cameras`` is ``(views, 3, 4)`` camera-to-world matrices (NumPy or a CUDA array), the OpenGL convention;
+        the default frames each world. With ``zero_copy=True`` the images are CUDA arrays for
+        ``torch.from_dlpack`` and the like, overwritten by the next render. See
+        :meth:`neraulgraphics.BatchRenderer.render`.
+        """
+        self.update(state)
+        return self.renderer.render(self.default_cameras() if cameras is None else cameras, self.fov if fov is None else fov,
+                                    samples_per_pixel, rgb=rgb, depth=depth, normals=normals, object_ids=object_ids,
+                                    frame=frame, zero_copy=zero_copy)
+
+    def cast_rays(self, origins, directions, max_distance: float = float("inf")) -> dict:
+        """Ray queries in every world: ``(world_count, rays_per_world, 3)`` arrays. See :meth:`neraulgraphics.BatchRenderer.cast_rays`."""
+        return self.renderer.cast_rays(origins, directions, max_distance)
