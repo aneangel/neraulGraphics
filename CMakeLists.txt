@@ -71,6 +71,8 @@ endif()
 # The renderer on its own: no window, no SDL. Consumers link neraulgraphics::core.
 add_library(neraulgraphics_core STATIC
     src/renderer.cpp
+    src/batch.cpp
+    src/validate.cpp
     src/cpu_backend.cpp
     src/instances.cpp
     src/bvh.cpp
@@ -93,6 +95,7 @@ target_sources(neraulgraphics_core PUBLIC
     FILE_SET HEADERS
     BASE_DIRS include ${CMAKE_CURRENT_BINARY_DIR}/include
     FILES
+        include/neraulgraphics/batch.h
         include/neraulgraphics/mesh.h
         include/neraulgraphics/renderer.h
         include/neraulgraphics/scene.h
@@ -152,6 +155,13 @@ if (NERAULGRAPHICS_BUILD_TESTS)
     target_compile_options(neraulgraphics-tests PRIVATE
         $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:-ffast-math>)
     add_test(NAME renderer COMMAND neraulgraphics-tests)
+
+    # Batched worlds, in their own program: they are large and run on every device available.
+    add_executable(neraulgraphics-batch-tests tests/test_batch.cpp)
+    target_link_libraries(neraulgraphics-batch-tests PRIVATE neraulgraphics::core)
+    target_compile_options(neraulgraphics-batch-tests PRIVATE
+        $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:-ffast-math>)
+    add_test(NAME batch COMMAND neraulgraphics-batch-tests)
 endif()
 
 # ----------------------------------------------------------------- python --

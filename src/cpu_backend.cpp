@@ -108,7 +108,8 @@ void parallel_chunks(const int total, const int chunk, Fn &&fn) {
 
 class CpuBackend final : public Backend {
 public:
-    explicit CpuBackend(SceneInput scene) : width_(scene.width), height_(scene.height) {
+    explicit CpuBackend(SceneInput scene)
+        : width_(scene.width), height_(scene.height), worlds_(scene.worlds), cameras_per_world_(scene.cameras_per_world) {
         for (size_t i = 0; i < scene.spheres.size(); ++i) params_.spheres[i] = host::to_device(scene.spheres[i]);
         for (size_t i = 0; i < scene.lights.size(); ++i) params_.lights[i] = host::to_device(scene.lights[i]);
         params_.floor = host::to_device(scene.floor);
@@ -128,17 +129,17 @@ public:
 
         if (scene.built != nullptr) {
             BuiltMeshes &built = *scene.built;
-            instances_ = std::make_unique<InstanceSet>(built, scene.instances);
+            instances_ = std::make_unique<InstanceSet>(built, scene.instances, scene.worlds);
             blas_ = std::move(built.nodes);
             // Stored as float4 so the alignment the shading code assumes is guaranteed.
             triangles_ = to_float4(built.triangles);
             attributes_ = to_float4(built.attributes);
-            tlas_instance_.resize(scene.instances.size());
-            records_.resize(scene.instances.size());
-            refresh_instances(true);
-            params_.mesh = host::MeshScene{instances_->tlas.nodes.data(), tlas_instance_.data(), records_.data(),
-                blas_.data(), triangles_.data(), attributes_.empty() ? nullptr : attributes_.data(),
-                texture_handles_.empty() ? nullptr : texture_handles_.data(), static_cast<int>(scene.instances.size())};
+            records_.resize(instances_->size());
+            params_.mesh = host::MeshScene{nullptr, nullptr, records_.data(), blas_.data(), triangles_.data(),
+                attributes_.empty() ? nullptr : attributes_.data(),
+                texture_handles_.empty() ? nullptr : texture_handles_.data(), static_cast<int>(instances_->size()),
+                static_cast<int>(instances_->per_world())};
+            refresh_instances();
         }
     }
 
@@ -173,7 +174,7 @@ public:
             const host::Camera cam = host::to_device(camera);
             parallel_chunks(height_, 4, [&](const int y0, const int y1) {
                 for (int y = y0; y < y1; ++y)
-                    for (int x = 0; x < width_; ++x) host::aov_pixel(params_, aov, x, y, width_, height_, cam);
+                    for (int x = 0; x < width_; ++x) host::aov_pixel(params_, 0, aov, x, y, width_, height_, cam);
             });
         }
         ms_ = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
@@ -187,7 +188,7 @@ public:
         ray_id_.resize(count);
         parallel_chunks(count, 256, [&](const int begin, const int end) {
             for (int i = begin; i < end; ++i)
-                host::cast_ray(params_, origins, directions, max_distance, i, ray_distance_.data(), ray_normal_.data(),
+                host::cast_ray(params_, 0, origins, directions, max_distance, i, ray_distance_.data(), ray_normal_.data(),
                     ray_id_.data());
         });
         return RayHits{Memory::Host, 0, count, ray_distance_.data(), ray_normal_.data(), ray_id_.data()};
@@ -196,7 +197,78 @@ public:
     void copy_to_host(const void *src, void *dst, const size_t bytes) const override { std::memcpy(dst, src, bytes); }
 
     void set_instance_transforms(const std::vector<Transform> &transforms) override {
-        refresh_instances(instances_->update(transforms));
+        instances_->update(transforms);
+        refresh_instances();
+    }
+
+    // --- Batched worlds.
+
+    void set_instance_matrices(const float *matrices, const Memory memory) override {
+        require_host(memory);
+        if (!instances_) return;
+        instances_->update(matrices);
+        refresh_instances();
+    }
+
+    void bind_bodies(const BodyBinding &binding) override { binding_ = binding; }
+
+    void set_body_poses(const float *body_poses, const Memory memory) override {
+        require_host(memory);
+        if (!instances_) return;
+        std::vector<float> matrices(instances_->size() * 12);
+        body_poses_to_matrices(binding_, worlds_, body_poses, matrices.data());
+        instances_->update(matrices.data());
+        refresh_instances();
+    }
+
+    BatchFrame render_batch(const float *camera_matrices, const Memory camera_memory, const float fov,
+        const int samples_per_pixel, const unsigned outputs, const int frame) override {
+        require_host(camera_memory);
+        const auto start = std::chrono::steady_clock::now();
+        const int views = worlds_ * cameras_per_world_;
+        const size_t pixels = static_cast<size_t>(views) * width_ * height_;
+        BatchFrame f{Memory::Host, 0, views, width_, height_, nullptr, nullptr, nullptr, nullptr};
+        if (outputs & OUTPUT_RGB) { batch_rgb_.resize(pixels * 3); f.rgb = batch_rgb_.data(); }
+        if (outputs & OUTPUT_DEPTH) { batch_depth_.resize(pixels); f.depth = batch_depth_.data(); }
+        if (outputs & OUTPUT_NORMAL) { batch_normal_.resize(pixels * 3); f.normal = batch_normal_.data(); }
+        if (outputs & OUTPUT_OBJECT_ID) { batch_id_.resize(pixels); f.object_id = batch_id_.data(); }
+
+        std::vector<host::Camera> cameras(views);
+        for (int v = 0; v < views; ++v) cameras[v] = host::camera_from_matrix(camera_matrices + 12 * v, fov, width_, height_);
+
+        // A work item is one row of one view.
+        parallel_chunks(views * height_, 4, [&](const int begin, const int end) {
+            for (int item = begin; item < end; ++item) {
+                const int view = item / height_, y = item % height_, world = view / cameras_per_world_;
+                const size_t offset = static_cast<size_t>(view) * width_ * height_;
+                const host::AovBuffers aov{f.depth ? batch_depth_.data() + offset : nullptr,
+                    f.normal ? batch_normal_.data() + 3 * offset : nullptr, f.object_id ? batch_id_.data() + offset : nullptr};
+                for (int x = 0; x < width_; ++x) {
+                    if (f.rgb)
+                        host::render_pixel_rgb8(params_, world, batch_rgb_.data() + 3 * offset, x, y, width_, height_,
+                            cameras[view], frame, samples_per_pixel);
+                    if (aov.depth || aov.normal || aov.object_id)
+                        host::aov_pixel(params_, world, aov, x, y, width_, height_, cameras[view]);
+                }
+            }
+        });
+        ms_ = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
+        return f;
+    }
+
+    RayHits cast_rays_batch(const float *origins, const float *directions, const int rays_per_world,
+        const float max_distance, const Memory input_memory) override {
+        require_host(input_memory);
+        const int count = worlds_ * rays_per_world;
+        ray_distance_.resize(count);
+        ray_normal_.resize(static_cast<size_t>(count) * 3);
+        ray_id_.resize(count);
+        parallel_chunks(count, 256, [&](const int begin, const int end) {
+            for (int i = begin; i < end; ++i)
+                host::cast_ray(params_, i / rays_per_world, origins, directions, max_distance, i, ray_distance_.data(),
+                    ray_normal_.data(), ray_id_.data());
+        });
+        return RayHits{Memory::Host, 0, count, ray_distance_.data(), ray_normal_.data(), ray_id_.data()};
     }
 
     void set_ambient(const float ambient) override { params_.ambient = ambient; }
@@ -205,13 +277,18 @@ public:
     Device device() const override { return Device::Cpu; }
 
 private:
+    static void require_host(const Memory memory) {
+        if (memory != Memory::Host)
+            throw std::invalid_argument("device pointers need a CUDA renderer; this one runs on the CPU");
+    }
+
     // The picture, into pixels_ (0xAARRGGBB).
     void draw(const Camera &camera, const int frame, const int samples_per_frame) {
         const host::Camera cam = host::to_device(camera);
         parallel_chunks(height_, 4, [&](const int y0, const int y1) {
             for (int y = y0; y < y1; ++y)
                 for (int x = 0; x < width_; ++x)
-                    host::render_pixel(params_, accum_.data(), pixels_.data(), x, y, width_, height_, cam, frame,
+                    host::render_pixel(params_, 0, accum_.data(), pixels_.data(), x, y, width_, height_, cam, frame,
                         samples_per_frame);
         });
     }
@@ -222,9 +299,9 @@ private:
         return out;
     }
 
-    // Converts the shared instance records to this backend's layout. The top-level BVH's nodes
-    // are read in place from instances_, which refits them, so only the records need rewriting.
-    void refresh_instances(const bool rebuilt) {
+    // Converts the shared instance records to this backend's layout. The instance trees are read in
+    // place from instances_, which updates them, so only the records need rewriting.
+    void refresh_instances() {
         for (size_t i = 0; i < records_.size(); ++i) {
             const InstanceRecord &r = instances_->records[i];
             for (int row = 0; row < 3; ++row)
@@ -233,13 +310,16 @@ private:
             records_[i].texture = r.texture;
             records_[i].material = host::to_device(r.material);
         }
-        if (rebuilt) std::copy(instances_->tlas.order.begin(), instances_->tlas.order.end(), tlas_instance_.begin());
-        // A rebuild replaces the node array, so the pointer the trace reads must follow it.
-        params_.mesh.tlas = instances_->tlas.nodes.data();
+        // An update can reallocate the node array, so the pointers the trace reads must follow it.
+        params_.mesh.tlas = instances_->nodes.data();
+        params_.mesh.tlas_root = instances_->roots.data();
     }
 
     int width_;
     int height_;
+    int worlds_;
+    int cameras_per_world_;
+    BodyBinding binding_;
     host::SceneParams params_{};
     std::vector<host::float4> accum_;
     std::vector<uint32_t> pixels_;
@@ -250,6 +330,10 @@ private:
     std::vector<float> depth_;
     std::vector<float> normal_;
     std::vector<int32_t> id_;
+    std::vector<uint8_t> batch_rgb_;
+    std::vector<float> batch_depth_;
+    std::vector<float> batch_normal_;
+    std::vector<int32_t> batch_id_;
     std::vector<float> ray_distance_;
     std::vector<float> ray_normal_;
     std::vector<int32_t> ray_id_;
@@ -258,7 +342,6 @@ private:
     std::vector<bvh::Node> blas_;
     std::vector<host::float4> triangles_;
     std::vector<host::float4> attributes_;
-    std::vector<int> tlas_instance_;
     std::vector<host::Instance> records_;
 
     std::vector<std::vector<uint8_t>> texture_bytes_;

@@ -26,6 +26,8 @@ namespace {
 
 }  // namespace
 
+#include "cuda_tlas.cuh"
+
 namespace neraulgraphics::device {
 namespace {
 
@@ -40,7 +42,7 @@ __global__ void render_kernel(const __grid_constant__ SceneParams s, float4 *acc
     const int x = blockIdx.x * blockDim.x + threadIdx.x;
     const int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= width || y >= height) return;  // the grid rounds up to whole blocks
-    render_pixel(s, accum, out, x, y, width, height, cam, frame, spp);
+    render_pixel(s, 0, accum, out, x, y, width, height, cam, frame, spp);
 }
 
 // Depth, normal and object ID for each pixel: see aov_pixel.
@@ -49,7 +51,7 @@ __global__ void aov_kernel(const __grid_constant__ SceneParams s, const AovBuffe
     const int x = blockIdx.x * blockDim.x + threadIdx.x;
     const int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= width || y >= height) return;
-    aov_pixel(s, out, x, y, width, height, cam);
+    aov_pixel(s, 0, out, x, y, width, height, cam);
 }
 
 // 0xAARRGGBB pixels to red, green, blue bytes.
@@ -67,7 +69,77 @@ __global__ void ray_kernel(const __grid_constant__ SceneParams s, const float *o
     const float max_distance, const int count, float *distance, float *normal, int32_t *object_id) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= count) return;
-    cast_ray(s, origins, directions, max_distance, i, distance, normal, object_id);
+    cast_ray(s, 0, origins, directions, max_distance, i, distance, normal, object_id);
+}
+
+// Every view of a batch: the picture and the other images for each pixel of each camera. The grid is one
+// long row of tiles: the tiles of the first view, then the second's, and so on, which sidesteps the limit on a
+// grid's other dimensions. The camera of a view is built here from its matrix.
+__global__ void batch_kernel(const __grid_constant__ SceneParams s, const float *cameras, const float fov,
+    const int width, const int height, const int cameras_per_world, const int frame, const int spp, uint8_t *rgb,
+    const AovBuffers aov, const int tiles_x, const int tiles_y) {
+    const int tiles = tiles_x * tiles_y;
+    const int view = blockIdx.x / tiles, tile = blockIdx.x % tiles;
+    const int x = (tile % tiles_x) * blockDim.x + threadIdx.x;
+    const int y = (tile / tiles_x) * blockDim.y + threadIdx.y;
+    if (x >= width || y >= height) return;
+    const Camera cam = camera_from_matrix(cameras + 12 * static_cast<size_t>(view), fov, width, height);
+    const int world = view / cameras_per_world;
+    const size_t offset = static_cast<size_t>(view) * width * height;
+    if (rgb) render_pixel_rgb8(s, world, rgb + 3 * offset, x, y, width, height, cam, frame, spp);
+    if (aov.depth || aov.normal || aov.object_id) {
+        const AovBuffers mine{aov.depth ? aov.depth + offset : nullptr, aov.normal ? aov.normal + 3 * offset : nullptr,
+            aov.object_id ? aov.object_id + offset : nullptr};
+        aov_pixel(s, world, mine, x, y, width, height, cam);
+    }
+}
+
+// Ray queries over the worlds of a batch: ray i belongs to world i / rays_per_world.
+__global__ void ray_batch_kernel(const __grid_constant__ SceneParams s, const float *origins, const float *directions,
+    const float max_distance, const int rays_per_world, const int count, float *distance, float *normal, int32_t *object_id) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= count) return;
+    cast_ray(s, i / rays_per_world, origins, directions, max_distance, i, distance, normal, object_id);
+}
+
+// Rotation matrix of a quaternion x, y, z, w (normalized first), row-major.
+__device__ __forceinline__ void quat_matrix(const float *q, float *r) {
+    float x = q[0], y = q[1], z = q[2], w = q[3];
+    const float n = sqrtf(x * x + y * y + z * z + w * w);
+    if (n > 0.0f) { x /= n; y /= n; z /= n; w /= n; } else { x = y = z = 0.0f; w = 1.0f; }
+    r[0] = 1 - 2 * (y * y + z * z); r[1] = 2 * (x * y - z * w);     r[2] = 2 * (x * z + y * w);
+    r[3] = 2 * (x * y + z * w);     r[4] = 1 - 2 * (x * x + z * z); r[5] = 2 * (y * z - x * w);
+    r[6] = 2 * (x * z - y * w);     r[7] = 2 * (y * z + x * w);     r[8] = 1 - 2 * (x * x + y * y);
+}
+
+// One thread per instance of every world: its matrix from its body's pose, its own offset and its scale. The same
+// arithmetic as body_poses_to_matrices on the host.
+__global__ void bodies_to_matrices(const float *body_poses, const int *body_of_instance, const float *local_pose,
+    const float *scale, const int per_world, const int bodies_per_world, const int total, float *matrices) {
+    const int g = blockIdx.x * blockDim.x + threadIdx.x;
+    if (g >= total) return;
+    const int w = g / per_world, i = g % per_world;
+    const float *lp = local_pose + 7 * i, *sc = scale + 3 * i;
+    float rl[9], r[9], p[3] = {lp[0], lp[1], lp[2]};
+    quat_matrix(lp + 3, rl);
+    const int body = body_of_instance[i];
+    if (body < 0) {
+        for (int k = 0; k < 9; ++k) r[k] = rl[k];
+    } else {
+        const float *bp = body_poses + 7 * (static_cast<size_t>(w) * bodies_per_world + body);
+        float rb[9];
+        quat_matrix(bp + 3, rb);
+        for (int row = 0; row < 3; ++row) {
+            for (int col = 0; col < 3; ++col)
+                r[3 * row + col] = rb[3 * row] * rl[col] + rb[3 * row + 1] * rl[3 + col] + rb[3 * row + 2] * rl[6 + col];
+            p[row] = bp[row] + rb[3 * row] * lp[0] + rb[3 * row + 1] * lp[1] + rb[3 * row + 2] * lp[2];
+        }
+    }
+    float *m = matrices + 12 * static_cast<size_t>(g);
+    for (int row = 0; row < 3; ++row) {
+        for (int col = 0; col < 3; ++col) m[4 * row + col] = r[3 * row + col] * sc[col];
+        m[4 * row + 3] = p[row];
+    }
 }
 
 }  // namespace
@@ -90,10 +162,22 @@ struct CudaResources {
     // ones are rewritten by every set_instance_transforms().
     bvh::Node *d_blas_ = nullptr;
     float4 *d_triangles_ = nullptr;
-    bvh::Node *d_tlas_ = nullptr;
-    int *d_tlas_instance_ = nullptr;
     device::Instance *d_instances_ = nullptr;
     float4 *d_attributes_ = nullptr;
+
+    // Batched worlds: the matrices of every instance (the tree builder reads them), the bodies that carry
+    // the instances, the cameras of the last batch, and the images of a batch.
+    float *d_matrices_ = nullptr;
+    int *d_body_of_instance_ = nullptr;
+    float *d_local_pose_ = nullptr;
+    float *d_scale_ = nullptr;
+    float *d_body_poses_ = nullptr;
+    float *d_cameras_ = nullptr;
+    int camera_capacity_ = 0;
+    uint8_t *d_batch_rgb_ = nullptr;
+    float *d_batch_depth_ = nullptr;
+    float *d_batch_normal_ = nullptr;
+    int32_t *d_batch_id_ = nullptr;
 
     // What render_frame() hands out and what ray queries read and write, allocated when first needed
     // and kept (a ray query grows them to the largest batch seen).
@@ -126,8 +210,16 @@ struct CudaResources {
         cudaFreeHost(h_pixels_);
         cudaFree(d_blas_);
         cudaFree(d_triangles_);
-        cudaFree(d_tlas_);
-        cudaFree(d_tlas_instance_);
+        cudaFree(d_matrices_);
+        cudaFree(d_body_of_instance_);
+        cudaFree(d_local_pose_);
+        cudaFree(d_scale_);
+        cudaFree(d_body_poses_);
+        cudaFree(d_cameras_);
+        cudaFree(d_batch_rgb_);
+        cudaFree(d_batch_depth_);
+        cudaFree(d_batch_normal_);
+        cudaFree(d_batch_id_);
         cudaFree(d_instances_);
         cudaFree(d_attributes_);
         cudaFree(d_rgb_);
@@ -149,7 +241,8 @@ struct CudaResources {
 
 class CudaBackend final : public Backend, private CudaResources {
 public:
-    explicit CudaBackend(const SceneInput &scene) : width_(scene.width), height_(scene.height) {
+    explicit CudaBackend(const SceneInput &scene)
+        : width_(scene.width), height_(scene.height), worlds_(scene.worlds), cameras_per_world_(scene.cameras_per_world) {
         // A grid is at most 65535 blocks tall.
         if (height_ > 65535 * device::BLOCK_Y)
             throw std::invalid_argument("frame height " + std::to_string(height_) + " is too large");
@@ -273,8 +366,137 @@ public:
     }
 
     void set_instance_transforms(const std::vector<Transform> &transforms) override {
-        const bool rebuilt = instances_->update(transforms);
-        upload_instances(rebuilt);
+        set_instance_matrices(transforms.empty() ? nullptr : transforms.front().m, Memory::Host);
+    }
+
+    // --- Batched worlds.
+
+    // The trees over the instances are rebuilt on the GPU from these matrices: from the caller's own array if it is
+    // on the device, else from a copy of the host array.
+    void set_instance_matrices(const float *matrices, const Memory memory) override {
+        if (!tlas_builder_) return;
+        const float *source = matrices;
+        if (memory == Memory::Host) {
+            CUDA_CHECK(cudaMemcpy(d_matrices_, matrices, static_cast<size_t>(tlas_builder_->total()) * 12 * sizeof(float),
+                cudaMemcpyHostToDevice));
+            source = d_matrices_;
+        }
+        tlas_builder_->build(source, d_instances_);
+    }
+
+    void bind_bodies(const BodyBinding &binding) override {
+        if (!tlas_builder_) return;
+        const size_t n = binding.body_of_instance.size();
+        bodies_per_world_ = binding.bodies_per_world;
+        // Replaces any earlier binding.
+        cudaFree(d_body_of_instance_);
+        cudaFree(d_local_pose_);
+        cudaFree(d_scale_);
+        cudaFree(d_body_poses_);
+        d_body_of_instance_ = nullptr;
+        d_local_pose_ = d_scale_ = d_body_poses_ = nullptr;
+        CUDA_CHECK(cudaMalloc(&d_body_of_instance_, n * sizeof(int)));
+        CUDA_CHECK(cudaMalloc(&d_local_pose_, 7 * n * sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_scale_, 3 * n * sizeof(float)));
+        CUDA_CHECK(cudaMemcpy(d_body_of_instance_, binding.body_of_instance.data(), n * sizeof(int), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_local_pose_, binding.local_pose.data(), 7 * n * sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_scale_, binding.scale.data(), 3 * n * sizeof(float), cudaMemcpyHostToDevice));
+        const size_t body_floats = 7 * static_cast<size_t>(worlds_) * bodies_per_world_;
+        if (body_floats > 0) CUDA_CHECK(cudaMalloc(&d_body_poses_, body_floats * sizeof(float)));
+    }
+
+    void set_body_poses(const float *body_poses, const Memory memory) override {
+        if (!tlas_builder_) return;
+        const float *source = body_poses;
+        const size_t body_floats = 7 * static_cast<size_t>(worlds_) * bodies_per_world_;
+        if (memory == Memory::Host && body_floats > 0) {
+            CUDA_CHECK(cudaMemcpy(d_body_poses_, body_poses, body_floats * sizeof(float), cudaMemcpyHostToDevice));
+            source = d_body_poses_;
+        }
+        constexpr int THREADS = 128;
+        const int total = tlas_builder_->total();
+        device::bodies_to_matrices<<<(total + THREADS - 1) / THREADS, THREADS>>>(source, d_body_of_instance_, d_local_pose_,
+            d_scale_, per_world_, bodies_per_world_, total, d_matrices_);
+        CUDA_CHECK(cudaGetLastError());
+        tlas_builder_->build(d_matrices_, d_instances_);
+    }
+
+    BatchFrame render_batch(const float *camera_matrices, const Memory camera_memory, const float fov,
+        const int samples_per_pixel, const unsigned outputs, const int frame) override {
+        const int views = worlds_ * cameras_per_world_;
+        const size_t pixels = static_cast<size_t>(views) * width_ * height_;
+        BatchFrame f{Memory::Device, device_id_, views, width_, height_, nullptr, nullptr, nullptr, nullptr};
+        if (outputs & OUTPUT_RGB) f.rgb = ensure(d_batch_rgb_, pixels * 3);
+        if (outputs & OUTPUT_DEPTH) f.depth = ensure(d_batch_depth_, pixels);
+        if (outputs & OUTPUT_NORMAL) f.normal = ensure(d_batch_normal_, pixels * 3);
+        if (outputs & OUTPUT_OBJECT_ID) f.object_id = ensure(d_batch_id_, pixels);
+
+        const float *cameras = camera_matrices;
+        if (camera_memory == Memory::Host) {
+            if (views > camera_capacity_) {
+                cudaFree(d_cameras_);
+                d_cameras_ = nullptr;
+                camera_capacity_ = 0;
+                CUDA_CHECK(cudaMalloc(&d_cameras_, static_cast<size_t>(views) * 12 * sizeof(float)));
+                camera_capacity_ = views;
+            }
+            CUDA_CHECK(cudaMemcpy(d_cameras_, camera_matrices, static_cast<size_t>(views) * 12 * sizeof(float), cudaMemcpyHostToDevice));
+            cameras = d_cameras_;
+        }
+
+        const int tiles_x = (width_ + device::BLOCK_X - 1) / device::BLOCK_X, tiles_y = (height_ + device::BLOCK_Y - 1) / device::BLOCK_Y;
+        const long long blocks = static_cast<long long>(views) * tiles_x * tiles_y;
+        if (blocks > INT32_MAX) throw std::invalid_argument("too many views for one batch: " + std::to_string(views));
+        const device::AovBuffers aov{f.depth ? d_batch_depth_ : nullptr, f.normal ? d_batch_normal_ : nullptr,
+            f.object_id ? d_batch_id_ : nullptr};
+        CUDA_CHECK(cudaEventRecord(ev_start_));
+        device::batch_kernel<<<static_cast<unsigned>(blocks), dim3(device::BLOCK_X, device::BLOCK_Y)>>>(params_, cameras, fov, width_,
+            height_, cameras_per_world_, frame, samples_per_pixel, f.rgb ? d_batch_rgb_ : nullptr, aov, tiles_x, tiles_y);
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaEventRecord(ev_stop_));
+        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaEventElapsedTime(&kernel_ms_, ev_start_, ev_stop_));
+        return f;
+    }
+
+    RayHits cast_rays_batch(const float *origins, const float *directions, const int rays_per_world,
+        const float max_distance, const Memory input_memory) override {
+        const int count = worlds_ * rays_per_world;
+        if (count == 0) return RayHits{Memory::Device, device_id_, 0, nullptr, nullptr, nullptr};
+        const float *o = origins, *d = directions;
+        if (input_memory == Memory::Host) {
+            if (count > ray_input_capacity_) {
+                cudaFree(d_ray_origin_);
+                cudaFree(d_ray_direction_);
+                d_ray_origin_ = d_ray_direction_ = nullptr;
+                ray_input_capacity_ = 0;
+                CUDA_CHECK(cudaMalloc(&d_ray_origin_, static_cast<size_t>(count) * 3 * sizeof(float)));
+                CUDA_CHECK(cudaMalloc(&d_ray_direction_, static_cast<size_t>(count) * 3 * sizeof(float)));
+                ray_input_capacity_ = count;
+            }
+            CUDA_CHECK(cudaMemcpy(d_ray_origin_, origins, static_cast<size_t>(count) * 3 * sizeof(float), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(d_ray_direction_, directions, static_cast<size_t>(count) * 3 * sizeof(float), cudaMemcpyHostToDevice));
+            o = d_ray_origin_;
+            d = d_ray_direction_;
+        }
+        if (count > ray_capacity_) {
+            cudaFree(d_hit_distance_);
+            cudaFree(d_hit_normal_);
+            cudaFree(d_hit_id_);
+            d_hit_distance_ = d_hit_normal_ = nullptr;
+            d_hit_id_ = nullptr;
+            ray_capacity_ = 0;
+            CUDA_CHECK(cudaMalloc(&d_hit_distance_, static_cast<size_t>(count) * sizeof(float)));
+            CUDA_CHECK(cudaMalloc(&d_hit_normal_, static_cast<size_t>(count) * 3 * sizeof(float)));
+            CUDA_CHECK(cudaMalloc(&d_hit_id_, static_cast<size_t>(count) * sizeof(int32_t)));
+            ray_capacity_ = count;
+        }
+        constexpr int THREADS = 128;
+        device::ray_batch_kernel<<<(count + THREADS - 1) / THREADS, THREADS>>>(params_, o, d, max_distance, rays_per_world, count,
+            d_hit_distance_, d_hit_normal_, d_hit_id_);
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaDeviceSynchronize());
+        return RayHits{Memory::Device, device_id_, count, d_hit_distance_, d_hit_normal_, d_hit_id_};
     }
 
     void set_ambient(const float ambient) override { params_.ambient = ambient; }
@@ -329,60 +551,64 @@ private:
 
     void upload_meshes(const SceneInput &scene) {
         const BuiltMeshes &built = *scene.built;
-        instances_ = std::make_unique<InstanceSet>(built, scene.instances);
-        // 2n-1 nodes at most for n instances.
-        const size_t n = scene.instances.size();
+        // The records' fixed parts (mesh root, texture, material) and a first set of inverses come from the host
+        // set; the trees are never built on the host: the GPU builds them, from the matrices, every update.
+        InstanceSet initial(built, scene.instances, scene.worlds, false);
+        const size_t n = initial.size();
+        per_world_ = static_cast<int>(initial.per_world());
         CUDA_CHECK(cudaMalloc(&d_blas_, built.nodes.size() * sizeof(bvh::Node)));
         CUDA_CHECK(cudaMalloc(&d_triangles_, built.triangles.size() * sizeof(float)));
-        CUDA_CHECK(cudaMalloc(&d_tlas_, 2 * n * sizeof(bvh::Node)));
-        CUDA_CHECK(cudaMalloc(&d_tlas_instance_, n * sizeof(int)));
         CUDA_CHECK(cudaMalloc(&d_instances_, n * sizeof(device::Instance)));
-        CUDA_CHECK(cudaMemcpy(d_blas_, built.nodes.data(), built.nodes.size() * sizeof(bvh::Node),
-            cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(d_triangles_, built.triangles.data(), built.triangles.size() * sizeof(float),
-            cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMalloc(&d_matrices_, n * 12 * sizeof(float)));
+        CUDA_CHECK(cudaMemcpy(d_blas_, built.nodes.data(), built.nodes.size() * sizeof(bvh::Node), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_triangles_, built.triangles.data(), built.triangles.size() * sizeof(float), cudaMemcpyHostToDevice));
         if (!built.attributes.empty()) {
             CUDA_CHECK(cudaMalloc(&d_attributes_, built.attributes.size() * sizeof(float)));
-            CUDA_CHECK(cudaMemcpy(d_attributes_, built.attributes.data(), built.attributes.size() * sizeof(float),
-                cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(d_attributes_, built.attributes.data(), built.attributes.size() * sizeof(float), cudaMemcpyHostToDevice));
         }
-        upload_instances(true);
 
-        // Pointers are stable from here: set_instance_transforms() rewrites these buffers in place.
-        params_.mesh = device::MeshScene{d_tlas_, d_tlas_instance_, d_instances_, d_blas_, d_triangles_,
-            d_attributes_, d_textures_, static_cast<int>(n)};
-    }
-
-    // Uploads the instance records and the top-level BVH. A refit keeps the leaf order, so the
-    // instance indirection only needs uploading after a rebuild.
-    void upload_instances(const bool rebuilt) {
-        const size_t n = instances_->size();
         std::vector<device::Instance> records(n);
         for (size_t i = 0; i < n; ++i) {
-            const InstanceRecord &r = instances_->records[i];
+            const InstanceRecord &r = initial.records[i];
             for (int row = 0; row < 3; ++row)
                 records[i].inv[row] = make_float4(r.inv[4 * row], r.inv[4 * row + 1], r.inv[4 * row + 2], r.inv[4 * row + 3]);
             records[i].blas_root = r.blas_root;
             records[i].texture = r.texture;
             records[i].material = device::to_device(r.material);
         }
-        const bvh::Bvh &tlas = instances_->tlas;
-        CUDA_CHECK(cudaMemcpy(d_tlas_, tlas.nodes.data(), tlas.nodes.size() * sizeof(bvh::Node),
-            cudaMemcpyHostToDevice));
-        if (rebuilt) {
-            const std::vector<int> leaf_instance(tlas.order.begin(), tlas.order.end());
-            CUDA_CHECK(cudaMemcpy(d_tlas_instance_, leaf_instance.data(), n * sizeof(int), cudaMemcpyHostToDevice));
-        }
         CUDA_CHECK(cudaMemcpy(d_instances_, records.data(), n * sizeof(device::Instance), cudaMemcpyHostToDevice));
+
+        // Each instance's mesh box in the mesh's own space, which the builder transforms into the world.
+        std::vector<float> local_bounds;
+        for (const Instance &inst : scene.instances) {
+            const bvh::Aabb &b = built.bounds[inst.mesh];
+            local_bounds.insert(local_bounds.end(), {b.lo[0], b.lo[1], b.lo[2], b.hi[0], b.hi[1], b.hi[2]});
+        }
+        tlas_builder_ = std::make_unique<device::tlas::Builder>(scene.worlds, per_world_, local_bounds);
+
+        // Every world starts with the transforms the instances were given.
+        std::vector<float> matrices;
+        matrices.reserve(n * 12);
+        for (int w = 0; w < scene.worlds; ++w)
+            for (const Instance &inst : scene.instances) matrices.insert(matrices.end(), inst.transform.m, inst.transform.m + 12);
+        set_instance_matrices(matrices.data(), Memory::Host);
+
+        // Pointers are stable from here: every update rewrites these buffers in place.
+        params_.mesh = device::MeshScene{tlas_builder_->nodes, tlas_builder_->roots, d_instances_, d_blas_, d_triangles_,
+            d_attributes_, d_textures_, static_cast<int>(n), per_world_};
     }
 
     int width_;
     int height_;
+    int worlds_;
+    int cameras_per_world_;
+    int per_world_ = 0;
+    int bodies_per_world_ = 0;
     int device_id_ = 0;
     device::SceneParams params_{};
+    std::unique_ptr<device::tlas::Builder> tlas_builder_;
 
     float kernel_ms_ = 0.0f;
-    std::unique_ptr<InstanceSet> instances_;
 };
 
 }  // namespace

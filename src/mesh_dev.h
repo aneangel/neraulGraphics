@@ -20,6 +20,10 @@ namespace neraulgraphics::NG_NS {
 // stack never holds more entries than the tree is deep.
 constexpr int TRAVERSAL_STACK = bvh::MAX_DEPTH + 4;
 
+// The top-level tree is built on the GPU from sorted keys, whose depth is bounded by the key's bits
+// rather than by the SAH builder's depth limit, so it gets a deeper stack.
+constexpr int TLAS_STACK = 128;
+
 constexpr float NO_HIT = 1e30f;
 
 struct Instance {
@@ -30,14 +34,15 @@ struct Instance {
 };
 
 struct MeshScene {
-    const bvh::Node *tlas;       // top level; root is node 0
-    const int *tlas_instance;    // top-level leaf slot -> instance index
-    const Instance *instances;
+    const bvh::TlasNode *tlas;   // top level: the instance trees of every world, in one array
+    const int *tlas_root;        // per world: the node that roots its tree
+    const Instance *instances;   // world-major: all of world 0's instances, then world 1's, and so on
     const bvh::Node *blas;       // every mesh's nodes, concatenated
     const float4 *triangles;     // 3 float4 per triangle: v0, e1, e2
     const float4 *attributes;    // 4 float4 per triangle (see BuiltMeshes::attributes), or null if no mesh has any
     const TextureHandle *textures;
-    int instance_count;
+    int instance_count;          // over all worlds
+    int instances_per_world;     // every world holds the same instances, placed differently
 };
 
 // Matches mesh_build.h. Repeated here because that header is host-only.
@@ -96,29 +101,36 @@ GPU_FN bool triangle_hit(const float4 *tris, const int i, const float3 &o,
 // closer hit, which in turn lets this walk skip boxes that are now too far.
 // Returns true if a callback asked to stop (any-hit queries).
 //
+// Two layouts share this walk. A mesh's own tree (Tlas = false, bvh::Node) keeps its two children
+// side by side and its leaves hold a run of triangles: leaf(first triangle, count). The tree over
+// instances (Tlas = true, bvh::TlasNode) names its children and its leaves are single instances:
+// leaf(instance, 1).
+//
 // The nearer child is visited first and the farther one is pushed, with its entry
 // distance so it can be dropped if a closer hit is found before it is popped.
-template <class LeafFn>
-NG_FN bool traverse(const bvh::Node *nodes, const int root, const float3 &o, const float3 &inv_d,
+template <bool Tlas, class NodeT, class LeafFn>
+NG_FN bool traverse(const NodeT *nodes, const int root, const float3 &o, const float3 &inv_d,
     float &tmax, LeafFn &&leaf) {
     const float4 *raw = reinterpret_cast<const float4 *>(nodes);  // node i = raw[2i], raw[2i+1]
     if (box_entry(raw[2 * root], raw[2 * root + 1], o, inv_d, tmax) >= NO_HIT) return false;
 
-    int stack[TRAVERSAL_STACK];
-    float stack_t[TRAVERSAL_STACK];
+    constexpr int STACK = Tlas ? TLAS_STACK : TRAVERSAL_STACK;
+    int stack[STACK];
+    float stack_t[STACK];
     int sp = 0;
     int node = root;
     while (true) {
         const float4 n0 = raw[2 * node];
         const float4 n1 = raw[2 * node + 1];
-        const int count = ng_float_as_int(n1.w);
-        const int a = ng_float_as_int(n0.w);
+        const int w0 = ng_float_as_int(n0.w);
+        const int w1 = ng_float_as_int(n1.w);
 
         bool descended = false;
-        if (count > 0) {
-            if (leaf(a, count, tmax)) return true;
+        if (Tlas ? (w0 < 0) : (w1 > 0)) {
+            if (Tlas ? leaf(~w0, 1, tmax) : leaf(w0, w1, tmax)) return true;
         } else {
-            const int right = a + 1;
+            const int a = w0;
+            const int right = Tlas ? w1 : w0 + 1;
             const float dl = box_entry(raw[2 * a], raw[2 * a + 1], o, inv_d, tmax);
             const float dr = box_entry(raw[2 * right], raw[2 * right + 1], o, inv_d, tmax);
             if (dl < NO_HIT || dr < NO_HIT) {
@@ -156,19 +168,20 @@ GPU_FN float3 to_local_dir(const Instance &inst, const float3 &d) {
     return make_float3(dot(xyz3(inst.inv[0]), d), dot(xyz3(inst.inv[1]), d), dot(xyz3(inst.inv[2]), d));
 }
 
-// Closest hit. tmax is the distance to beat on entry (the sphere or floor hit found
+// Closest hit among the instances of one world: a ray only sees the instances of the world it was
+// cast in. tmax is the distance to beat on entry (the sphere or floor hit found
 // already) and the hit distance on a true return. Writes which instance and which
 // triangle (an index into the global triangle array), and where in it (barycentrics).
-NG_FN bool mesh_intersect(const MeshScene &m, const float3 &o, const float3 &d, float &tmax,
+NG_FN bool mesh_intersect(const MeshScene &m, const int world, const float3 &o, const float3 &d, float &tmax,
     int &hit_instance, int &hit_triangle, float &hit_u, float &hit_v) {
     bool found = false;
-    traverse(m.tlas, 0, o, safe_inverse(d), tmax, [&](const int first, const int count, float &top_tmax) {
+    traverse<true>(m.tlas, m.tlas_root[world], o, safe_inverse(d), tmax, [&](const int first, const int count, float &top_tmax) {
         for (int k = 0; k < count; ++k) {
-            const int id = m.tlas_instance[first + k];
+            const int id = first + k;
             const Instance &inst = m.instances[id];
             const float3 lo = to_local_point(inst, o);
             const float3 ld = to_local_dir(inst, d);
-            traverse(m.blas, inst.blas_root, lo, safe_inverse(ld), top_tmax,
+            traverse<false>(m.blas, inst.blas_root, lo, safe_inverse(ld), top_tmax,
                 [&](const int tri_first, const int tri_count, float &t_best) {
                     for (int j = tri_first; j < tri_first + tri_count; ++j) {
                         float t, bu, bv;
@@ -190,14 +203,14 @@ NG_FN bool mesh_intersect(const MeshScene &m, const float3 &o, const float3 &d, 
 }
 
 // Any hit closer than max_dist. Stops at the first one, which is all a shadow ray needs.
-NG_FN bool mesh_occluded(const MeshScene &m, const float3 &o, const float3 &d, const float max_dist) {
+NG_FN bool mesh_occluded(const MeshScene &m, const int world, const float3 &o, const float3 &d, const float max_dist) {
     float tmax = max_dist;
-    return traverse(m.tlas, 0, o, safe_inverse(d), tmax, [&](const int first, const int count, float &top_tmax) {
+    return traverse<true>(m.tlas, m.tlas_root[world], o, safe_inverse(d), tmax, [&](const int first, const int count, float &top_tmax) {
         for (int k = 0; k < count; ++k) {
-            const Instance &inst = m.instances[m.tlas_instance[first + k]];
+            const Instance &inst = m.instances[first + k];
             const float3 lo = to_local_point(inst, o);
             const float3 ld = to_local_dir(inst, d);
-            const bool blocked = traverse(m.blas, inst.blas_root, lo, safe_inverse(ld), top_tmax,
+            const bool blocked = traverse<false>(m.blas, inst.blas_root, lo, safe_inverse(ld), top_tmax,
                 [&](const int tri_first, const int tri_count, float &t_best) {
                     for (int j = tri_first; j < tri_first + tri_count; ++j) {
                         float t, bu, bv;

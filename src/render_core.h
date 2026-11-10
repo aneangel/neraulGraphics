@@ -52,7 +52,7 @@ NG_FN bool sphere_hit(const Sphere &sphere, const float3 &origin, const float3 &
 }
 
 // Closest-hit query. Records an index and resolves the surface once at the end.
-NG_FN bool scene_intersect(const SceneParams &s, const float3 &origin, const float3 &dir, Hit &hit) {
+NG_FN bool scene_intersect(const SceneParams &s, const int world, const float3 &origin, const float3 &dir, Hit &hit) {
     float best = 1e30f;
     int best_sphere = -1;
 
@@ -81,7 +81,7 @@ NG_FN bool scene_intersect(const SceneParams &s, const float3 &origin, const flo
     int best_triangle = -1;
     float best_u = 0.0f, best_v = 0.0f;
     if (s.mesh.instance_count > 0 &&
-        mesh_intersect(s.mesh, origin, dir, best, best_instance, best_triangle, best_u, best_v)) {
+        mesh_intersect(s.mesh, world, origin, dir, best, best_instance, best_triangle, best_u, best_v)) {
         best_sphere = -1;
         hit_floor = false;
     } else {
@@ -98,7 +98,7 @@ NG_FN bool scene_intersect(const SceneParams &s, const float3 &origin, const flo
         mesh_surface(s.mesh, best_instance, best_triangle, best_u, best_v, dir, hit.normal, tint);
         hit.material = s.mesh.instances[best_instance].material;
         hit.material.diffuse_color = hit.material.diffuse_color * tint;
-        hit.object = OBJECT_INSTANCE + best_instance;
+        hit.object = OBJECT_INSTANCE + (best_instance - world * s.mesh.instances_per_world);  // the same in every world
     } else if (hit_floor) {
         hit.object = OBJECT_FLOOR;
         hit.normal = make_float3(0.0f, 1.0f, 0.0f);
@@ -116,7 +116,7 @@ NG_FN bool scene_intersect(const SceneParams &s, const float3 &origin, const flo
 }
 
 // Any-hit query for shadow rays: returns on the first occluder found.
-NG_FN bool scene_occluded(const SceneParams &s, const float3 &origin, const float3 &dir, const float max_dist) {
+NG_FN bool scene_occluded(const SceneParams &s, const int world, const float3 &origin, const float3 &dir, const float max_dist) {
     for (int i = 0; i < s.sphere_count; ++i) {
         float t;
         if (sphere_hit(s.spheres[i], origin, dir, t) && t < max_dist) return true;
@@ -130,7 +130,7 @@ NG_FN bool scene_occluded(const SceneParams &s, const float3 &origin, const floa
         }
     }
 
-    return s.mesh.instance_count > 0 && mesh_occluded(s.mesh, origin, dir, max_dist);
+    return s.mesh.instance_count > 0 && mesh_occluded(s.mesh, world, origin, dir, max_dist);
 }
 
 // Vertical gradient background.
@@ -146,13 +146,13 @@ NG_FN float3 offset_origin(const float3 &point, const float3 &normal, const floa
 
 // Iterative path loop. `throughput` is the running product of reflectivities, so
 // the loop can stop once further bounces cannot affect the result.
-NG_FN float3 trace(const SceneParams &s, float3 origin, float3 dir, RNG &rng) {
+NG_FN float3 trace(const SceneParams &s, const int world, float3 origin, float3 dir, RNG &rng) {
     float3 radiance = make_float3(0.0f, 0.0f, 0.0f);
     float throughput = 1.0f;
 
     for (int depth = 0;; ++depth) {
         Hit hit;
-        if (depth > MAX_DEPTH || !scene_intersect(s, origin, dir, hit)) {
+        if (depth > MAX_DEPTH || !scene_intersect(s, world, origin, dir, hit)) {
             radiance += sky(dir) * throughput;
             break;
         }
@@ -166,7 +166,7 @@ NG_FN float3 trace(const SceneParams &s, float3 origin, float3 dir, RNG &rng) {
             const float light_distance = length(to_light);
             const float3 light_dir = to_light * (1.0f / light_distance);
 
-            if (scene_occluded(s, offset_origin(hit.point, hit.normal, light_dir), light_dir,
+            if (scene_occluded(s, world, offset_origin(hit.point, hit.normal, light_dir), light_dir,
                 light_distance))
                 continue;
 
@@ -188,22 +188,51 @@ NG_FN float3 trace(const SceneParams &s, float3 origin, float3 dir, RNG &rng) {
     return radiance;
 }
 
-// The work for one pixel: jitter, trace, accumulate, convert, pack.
-// s is a reference so the GPU can pass it as a __grid_constant__ without first copying the whole
-// scene from the parameter bank into local memory.
-NG_FN void render_pixel(const SceneParams &s, float4 *accum, uint32_t *out, const int x, const int y,
-    const int width, const int height, const Camera &cam, const int frame, const int spp) {
-    const int idx = y * width + x;
-    RNG rng = make_rng(idx, frame);
-
+// The picture's value at one pixel: spp jittered rays traced and averaged, in linear light.
+NG_FN float3 sample_pixel(const SceneParams &s, const int world, const int x, const int y, const int width,
+    const int height, const Camera &cam, const int frame, const int spp) {
+    RNG rng = make_rng(y * width + x, frame);
     float3 sum = make_float3(0.0f, 0.0f, 0.0f);
     for (int sample = 0; sample < spp; ++sample) {
         const float jx = rand_float(rng);
         const float jy = rand_float(rng);
-        sum += trace(s, cam.position,
+        sum += trace(s, world, cam.position,
             camera_ray(cam, static_cast<float>(x) + jx, static_cast<float>(y) + jy, width, height), rng);
     }
-    sum = sum * (1.0f / static_cast<float>(spp));
+    return sum * (1.0f / static_cast<float>(spp));
+}
+
+// A camera from a camera-to-world matrix: the top three rows of the 4x4, row-major, in the OpenGL
+// convention (x right, y up, looking along -z). The axes are renormalized, so a matrix that carries a
+// little scale or drift still gives a unit basis.
+NG_FN Camera camera_from_matrix(const float *m, const float fov, const int width, const int height) {
+    Camera c;
+    c.position = make_float3(m[3], m[7], m[11]);
+    c.right = normalize(make_float3(m[0], m[4], m[8]));
+    c.up = normalize(make_float3(m[1], m[5], m[9]));
+    c.forward = normalize(make_float3(-m[2], -m[6], -m[10]));
+    c.fov_scale = tanf(fov * 0.5f);
+    c.aspect = static_cast<float>(width) / static_cast<float>(height);
+    return c;
+}
+
+// The picture for one pixel of a batch, as red, green, blue bytes: no accumulation, so no buffer of sums.
+NG_FN void render_pixel_rgb8(const SceneParams &s, const int world, uint8_t *rgb, const int x, const int y,
+    const int width, const int height, const Camera &cam, const int frame, const int spp) {
+    const float3 c = linear_to_srgb(sample_pixel(s, world, x, y, width, height, cam, frame, spp));
+    const int idx = y * width + x;
+    rgb[3 * idx] = static_cast<uint8_t>(saturate(c.x) * 255.0f + 0.5f);
+    rgb[3 * idx + 1] = static_cast<uint8_t>(saturate(c.y) * 255.0f + 0.5f);
+    rgb[3 * idx + 2] = static_cast<uint8_t>(saturate(c.z) * 255.0f + 0.5f);
+}
+
+// The work for one pixel: jitter, trace, accumulate, convert, pack.
+// s is a reference so the GPU can pass it as a __grid_constant__ without first copying the whole
+// scene from the parameter bank into local memory.
+NG_FN void render_pixel(const SceneParams &s, const int world, float4 *accum, uint32_t *out, const int x, const int y,
+    const int width, const int height, const Camera &cam, const int frame, const int spp) {
+    const int idx = y * width + x;
+    const float3 sum = sample_pixel(s, world, x, y, width, height, cam, frame, spp);
 
     // Running average across frames. .w holds the sample count.
     const float4 acc = frame == 0 ? to_float4(sum, 1.0f) : accum[idx] + to_float4(sum, 1.0f);
@@ -225,12 +254,12 @@ struct AovBuffers {
 // Depth, normal and object ID for one pixel: a single ray through its middle, with no jitter and no
 // shading, so every value is exact and nothing is averaged across an object's edge.
 // Depth is measured along the camera's view axis, as a depth camera reports it, not along the ray.
-NG_FN void aov_pixel(const SceneParams &s, const AovBuffers &out, const int x, const int y, const int width,
+NG_FN void aov_pixel(const SceneParams &s, const int world, const AovBuffers &out, const int x, const int y, const int width,
     const int height, const Camera &cam) {
     const int idx = y * width + x;
     const float3 dir = camera_ray(cam, static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f, width, height);
     Hit hit;
-    const bool found = scene_intersect(s, cam.position, dir, hit);
+    const bool found = scene_intersect(s, world, cam.position, dir, hit);
     if (out.depth) out.depth[idx] = found ? hit.t * dot(dir, cam.forward) : ng_infinity();
     if (out.normal) {
         const float3 n = found ? hit.normal : make_float3(0.0f, 0.0f, 0.0f);
@@ -243,7 +272,7 @@ NG_FN void aov_pixel(const SceneParams &s, const AovBuffers &out, const int x, c
 
 // One ray of a ray query. Distance is along the (normalized) direction. A ray with a zero or
 // non-finite direction, or whose first hit is beyond max_distance, reports a miss.
-NG_FN void cast_ray(const SceneParams &s, const float *origins, const float *directions, const float max_distance,
+NG_FN void cast_ray(const SceneParams &s, const int world, const float *origins, const float *directions, const float max_distance,
     const int i, float *distance, float *normal, int32_t *object_id) {
     const float3 o = make_float3(origins[3 * i], origins[3 * i + 1], origins[3 * i + 2]);
     float3 d = make_float3(directions[3 * i], directions[3 * i + 1], directions[3 * i + 2]);
@@ -253,7 +282,7 @@ NG_FN void cast_ray(const SceneParams &s, const float *origins, const float *dir
     bool found = len2 > 1e-30f && len2 < 1e30f;
     if (found) {
         d = d * (1.0f / sqrtf(len2));
-        found = scene_intersect(s, o, d, hit) && hit.t <= max_distance;
+        found = scene_intersect(s, world, o, d, hit) && hit.t <= max_distance;
     }
     distance[i] = found ? hit.t : ng_infinity();
     const float3 n = found ? hit.normal : make_float3(0.0f, 0.0f, 0.0f);

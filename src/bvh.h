@@ -35,6 +35,20 @@ struct alignas(16) Node {
 };
 static_assert(sizeof(Node) == 32, "the kernel reads Node as two float4");
 
+// A node of the top-level tree over instances. Unlike Node, the two children are named explicitly
+// (they need not sit side by side), and a leaf is a node too, so every child has a box to test.
+// This is the layout the GPU's parallel builder produces, and one array holds the trees of every
+// world, each with its own root.
+//   interior: left and right are node indices (both >= 0)
+//   leaf:     left is ~instance (< 0), right is -1; the instance index counts over all worlds
+struct alignas(16) TlasNode {
+    float lo[3];
+    int32_t left;
+    float hi[3];
+    int32_t right;
+};
+static_assert(sizeof(TlasNode) == 32, "the kernel reads TlasNode as two float4");
+
 struct Bvh {
     std::vector<Node> nodes;     // nodes[0] is the root; empty if there were no primitives
     std::vector<uint32_t> order; // primitive indices, arranged so each leaf is a contiguous run

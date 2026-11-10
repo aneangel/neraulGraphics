@@ -36,6 +36,10 @@ void check_meshes(const std::vector<Mesh> &meshes, const std::vector<Instance> &
     const std::vector<Texture> &textures);
 void check_transform(const Transform &t, const std::string &name);
 
+// Whether t is finite and invertible, with no message built: for checking many transforms, where almost
+// every one is fine and the explanation is only wanted for the one that is not.
+bool transform_ok(const Transform &t);
+
 // Meshes must already have passed check_meshes.
 BuiltMeshes build_meshes(const std::vector<Mesh> &meshes);
 

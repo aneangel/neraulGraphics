@@ -23,6 +23,13 @@ constexpr size_t MAX_TRIANGLES = 100000000;
 
 }  // namespace
 
+bool transform_ok(const Transform &t) {
+    for (const float v : t.m)
+        if (!finite(v)) return false;
+    Transform inverse;
+    return invert_affine(t, inverse);
+}
+
 void check_transform(const Transform &t, const std::string &name) {
     for (const float v : t.m) require(finite(v), name + " has a NaN or infinite value");
     Transform inverse;

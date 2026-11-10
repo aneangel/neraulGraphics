@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <memory>
 #include <vector>
+#include <neraulgraphics/batch.h>
 #include <neraulgraphics/renderer.h>
 #include "mesh_build.h"
 
@@ -26,6 +27,10 @@ struct SceneInput {
     // The meshes' acceleration structures; null when there are no instances. A backend that
     // keeps them for itself may move out of them.
     BuiltMeshes *built;
+    // Batched worlds (see BatchRenderer): instances is what one world holds, and there are this many
+    // worlds, each seen by this many cameras. A plain Renderer is one world with one camera.
+    int worlds = 1;
+    int cameras_per_world = 1;
 };
 
 class Backend {
@@ -51,6 +56,19 @@ public:
     // Transforms are one per instance and already checked.
     virtual void set_instance_transforms(const std::vector<Transform> &transforms) = 0;
 
+    // --- Batched worlds. Pointers are in the memory named, and already validated if they are in host memory.
+
+    // 12 floats per instance, over every world, world-major.
+    virtual void set_instance_matrices(const float *matrices, Memory memory) = 0;
+    virtual void bind_bodies(const BodyBinding &binding) = 0;
+    // 7 floats per body, over every world, world-major.
+    virtual void set_body_poses(const float *body_poses, Memory memory) = 0;
+    // One 12-float camera-to-world matrix per view.
+    virtual BatchFrame render_batch(const float *camera_matrices, Memory camera_memory, float fov,
+        int samples_per_pixel, unsigned outputs, int frame) = 0;
+    virtual RayHits cast_rays_batch(const float *origins, const float *directions, int rays_per_world,
+        float max_distance, Memory input_memory) = 0;
+
     virtual void set_ambient(float ambient) = 0;
     virtual float ambient() const = 0;
 
@@ -65,6 +83,9 @@ std::unique_ptr<Backend> make_cpu_backend(const SceneInput &scene);
 
 // Built with CUDA, and a usable device is present.
 bool cuda_usable();
+
+// What Device::Auto means right now (NERAULGRAPHICS_DEVICE if set, else CUDA when usable); other values pass through.
+Device resolve_device(Device requested);
 
 }  // namespace neraulgraphics::detail
 
