@@ -139,6 +139,7 @@ const uint32_t *pixels = renderer.render(camera, frame, 1);   // ARGB, width*hei
 ```bash
 make raytracer                         # builds ./raytracer
 ./raytracer --instances 5000           # viewer with 5000 spinning bodies
+./raytracer --mode depth               # see what a depth camera sees (keys 1-4 switch: rgb, depth, normals, ids)
 make test                              # needs a GPU
 ```
 

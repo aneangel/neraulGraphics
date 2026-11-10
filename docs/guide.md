@@ -86,7 +86,11 @@ shows how long the GPU took to trace and how long the host took to update:
 | `Q` / `E` | Move down / up |
 | `Shift` | Move faster |
 | `P` | Save a screenshot as `screenshot.ppm` |
+| `1` `2` `3` `4` | Show the picture, depth, surface normals, or object IDs: what a robot's sensors see |
 | `Esc` | Quit |
+
+`./raytracer --mode depth` (or `normals`, `ids`) starts in a sensor view, and
+`./raytracer --snapshot out.ppm --mode ids` saves one frame without opening a window.
 
 The window title shows your framerate, how long the GPU spent on the last frame,
 and how many samples have built up in the current image.

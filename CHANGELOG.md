@@ -18,6 +18,8 @@ version (0.x.0) may change the API.
   they are CUDA arrays for `torch.from_dlpack`, `jax.dlpack.from_dlpack`, `warp.from_dlpack` or
   `cupy.from_dlpack`, already finished. `cast_rays` takes CUDA arrays such as PyTorch tensors and
   answers on the GPU. C++: `render_frame`, `render_frame_host`, `cast_rays`, `cast_rays_host`.
+- The viewer shows the sensor images: keys `1` to `4` switch between the picture, depth, normals
+  and object IDs, `--mode` starts in one, and `--snapshot FILE.ppm` saves a frame without a window.
 - `render_frame` and `cast_rays` on the Newton, MuJoCo and loaded-model renderers, `update(state)` to
   place shapes without drawing, and `object_id_of_shape` / `object_id_of_geom`.
 

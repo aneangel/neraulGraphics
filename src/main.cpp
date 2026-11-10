@@ -72,6 +72,69 @@ namespace {
         return make_transform(p, axis_angle(b.axis, b.spin * time + b.phase), b.scale);
     }
 
+    // What the window shows: the picture, or one of the sensor images, coloured so a person can read it.
+    enum class View { Rgb, Depth, Normals, Ids };
+
+    const char *view_name(const View v) {
+        switch (v) {
+            case View::Depth: return "depth";
+            case View::Normals: return "normals";
+            case View::Ids: return "object ids";
+            default: return "rgb";
+        }
+    }
+
+    uint32_t pack_argb(const float r, const float g, const float b) {
+        auto byte = [](const float c) { return static_cast<uint32_t>(std::max(0.0f, std::min(1.0f, c)) * 255.0f + 0.5f); };
+        return 0xFF000000u | byte(r) << 16 | byte(g) << 8 | byte(b);
+    }
+
+    // This file is built with -ffast-math, under which the compiler may assume there are no infinities,
+    // so "is this depth infinite" is answered by reading the float's exponent bits.
+    bool is_finite_value(const float v) {
+        uint32_t bits;
+        std::memcpy(&bits, &v, sizeof(bits));
+        return (bits & 0x7f800000u) != 0x7f800000u;
+    }
+
+    // A sensor image as 0xAARRGGBB pixels. Depth is white up close and fades to black far away, with
+    // nothing hit black. Normals are the usual colour code (x, y, z as red, green, blue), so a surface
+    // facing the camera is blue and one facing up is green. Each object ID gets its own colour.
+    void colorize(const HostFrame &f, const View view, std::vector<uint32_t> &out) {
+        const size_t n = static_cast<size_t>(f.width) * f.height;
+        out.assign(n, 0xFF000000u);
+        if (view == View::Depth) {
+            std::vector<float> finite;
+            for (const float d : f.depth) if (is_finite_value(d)) finite.push_back(d);
+            if (finite.empty()) return;
+            const float near_d = *std::min_element(finite.begin(), finite.end());
+            // The 98th percentile, not the maximum, so one far-away speck does not wash out everything else.
+            const size_t k = finite.size() * 98 / 100;
+            std::nth_element(finite.begin(), finite.begin() + static_cast<std::ptrdiff_t>(k), finite.end());
+            const float far_d = std::max(finite[k], near_d + 1e-3f);
+            for (size_t i = 0; i < n; ++i)
+                if (is_finite_value(f.depth[i])) {
+                    const float c = 1.0f - (f.depth[i] - near_d) / (far_d - near_d);
+                    out[i] = pack_argb(c, c, c);
+                }
+        } else if (view == View::Normals) {
+            for (size_t i = 0; i < n; ++i)
+                out[i] = pack_argb(f.normal[3 * i] * 0.5f + 0.5f, f.normal[3 * i + 1] * 0.5f + 0.5f, f.normal[3 * i + 2] * 0.5f + 0.5f);
+        } else if (view == View::Ids) {
+            for (size_t i = 0; i < n; ++i) {
+                const uint32_t id = static_cast<uint32_t>(f.object_id[i]);
+                if (id == static_cast<uint32_t>(OBJECT_NONE)) continue;
+                const uint32_t h = id * 2654435761u;  // spreads neighbouring IDs across the colour wheel
+                out[i] = pack_argb(0.25f + 0.75f * static_cast<float>(h >> 24 & 0xFF) / 255.0f,
+                    0.25f + 0.75f * static_cast<float>(h >> 16 & 0xFF) / 255.0f, 0.25f + 0.75f * static_cast<float>(h >> 8 & 0xFF) / 255.0f);
+            }
+        }
+    }
+
+    unsigned outputs_for(const View v) {
+        return v == View::Depth ? OUTPUT_DEPTH : v == View::Normals ? OUTPUT_NORMAL : v == View::Ids ? OUTPUT_OBJECT_ID : OUTPUT_RGB;
+    }
+
     void save_ppm(const uint32_t *pixels, const int width, const int height, const std::string &filename) {
         std::ofstream ofs(filename, std::ios::binary);
         ofs << "P6\n" << width << " " << height << "\n255\n";
@@ -85,7 +148,7 @@ namespace {
     }
 }
 
-int run(const int instance_count) {
+int run(const int instance_count, View view, const std::string &snapshot) {
     constexpr int width = 1920;
     constexpr int height = 1080;
     constexpr float fov = M_PI / 2;
@@ -140,6 +203,21 @@ int run(const int instance_count) {
     float update_ms = 0.0f;
     float time = 0.0f;
 
+    // --snapshot: draw one frame from the starting camera, save it, and leave, without opening a window.
+    if (!snapshot.empty()) {
+        const Camera camera = make_camera(Vec3{0, 0, 0}, forward_from_angles(0.0f, 0.0f), world_up, fov, width, height);
+        std::vector<uint32_t> shown;
+        if (view == View::Rgb) {
+            const uint32_t *p = gpu_renderer.render(camera, 0, 4);
+            shown.assign(p, p + static_cast<size_t>(width) * height);
+        } else {
+            colorize(gpu_renderer.render_frame_host(camera, 0, 1, outputs_for(view)), view, shown);
+        }
+        save_ppm(shown.data(), width, height, snapshot);
+        std::cout << "wrote " << snapshot << " (" << view_name(view) << ", " << width << "x" << height << ")\n";
+        return 0;
+    }
+
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         std::cerr << "SDL_Init: " << SDL_GetError() << "\n";
         return 1;
@@ -160,7 +238,9 @@ int run(const int instance_count) {
     const uint32_t *pixels = nullptr;
     uint64_t prev = SDL_GetPerformanceCounter();
 
-    std::cout << "drag left mouse to look, WASD to move, Q/E down/up, shift to sprint, P to save, Esc to quit\n";
+    std::cout << "drag left mouse to look, WASD to move, Q/E down/up, shift to sprint, P to save, Esc to quit\n"
+              << "1 rgb   2 depth   3 normals   4 object ids   (what a depth camera, a surface-normal sensor and a segmenter see)\n";
+    std::vector<uint32_t> shown;  // a sensor image as it is displayed
 
     while (running) {
         const uint64_t now = SDL_GetPerformanceCounter();
@@ -193,6 +273,10 @@ int run(const int instance_count) {
                     break;
                 case SDL_KEYDOWN:
                     if (event.key.keysym.scancode == SDL_SCANCODE_ESCAPE) running = false;
+                    if (event.key.keysym.scancode == SDL_SCANCODE_1) view = View::Rgb;
+                    if (event.key.keysym.scancode == SDL_SCANCODE_2) view = View::Depth;
+                    if (event.key.keysym.scancode == SDL_SCANCODE_3) view = View::Normals;
+                    if (event.key.keysym.scancode == SDL_SCANCODE_4) view = View::Ids;
                     if (event.key.keysym.scancode == SDL_SCANCODE_P && pixels) {
                         save_ppm(pixels, width, height, "./screenshot.ppm");
                         std::cout << "wrote ./screenshot.ppm (" << frame + 1 << " samples/pixel)\n";
@@ -232,7 +316,13 @@ int run(const int instance_count) {
         const Camera camera = make_camera(position, position + forward_from_angles(yaw, pitch),
             world_up, fov, width, height);
 
-        pixels = gpu_renderer.render(camera, frame, samples_per_frame);
+        if (view == View::Rgb) {
+            pixels = gpu_renderer.render(camera, frame, samples_per_frame);
+        } else {
+            // The sensor images are one exact ray per pixel, so there is nothing to accumulate.
+            colorize(gpu_renderer.render_frame_host(camera, 0, 1, outputs_for(view)), view, shown);
+            pixels = shown.data();
+        }
 
         SDL_UpdateTexture(texture, nullptr, pixels, width * sizeof(uint32_t));
         SDL_RenderClear(renderer);
@@ -240,9 +330,9 @@ int run(const int instance_count) {
         SDL_RenderPresent(renderer);
 
         char title[200];
-        snprintf(title, sizeof(title), "raytracer  %dx%d  %.1f fps  kernel %.2f ms  %d spp  pos %.1f %.1f %.1f",
-            width, height, 1.f / dt, gpu_renderer.last_kernel_ms(), (frame + 1) * samples_per_frame,
-            position.x, position.y, position.z);
+        snprintf(title, sizeof(title), "raytracer [%s]  %dx%d  %.1f fps  kernel %.2f ms  %d spp  pos %.1f %.1f %.1f",
+            view_name(view), width, height, 1.f / dt, gpu_renderer.last_kernel_ms(),
+            view == View::Rgb ? (frame + 1) * samples_per_frame : 1, position.x, position.y, position.z);
         if (!bodies.empty()) {
             const size_t used = strlen(title);
             snprintf(title + used, sizeof(title) - used, "  %zu bodies  update %.2f ms", bodies.size(), update_ms);
@@ -260,13 +350,30 @@ int run(const int instance_count) {
 // The renderer reports failures as exceptions; here they become a message and an exit status.
 int main(const int argc, char **argv) {
     int instance_count = 0;
+    View view = View::Rgb;
+    std::string snapshot;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--instances" && i + 1 < argc) {
             instance_count = std::atoi(argv[++i]);
+        } else if (arg == "--mode" && i + 1 < argc) {
+            const std::string m = argv[++i];
+            if (m == "rgb") view = View::Rgb;
+            else if (m == "depth") view = View::Depth;
+            else if (m == "normals") view = View::Normals;
+            else if (m == "ids") view = View::Ids;
+            else {
+                std::cerr << "error: --mode must be rgb, depth, normals or ids\n";
+                return 1;
+            }
+        } else if (arg == "--snapshot" && i + 1 < argc) {
+            snapshot = argv[++i];
         } else {
-            std::cerr << "usage: " << argv[0] << " [--instances N]\n"
-                      << "  --instances N  add N spinning boxes and spheres, to see how the BVH copes\n";
+            std::cerr << "usage: " << argv[0] << " [--instances N] [--mode rgb|depth|normals|ids] [--snapshot FILE.ppm]\n"
+                      << "  --instances N        add N spinning boxes and spheres, to see how the BVH copes\n"
+                      << "  --mode M             start showing the picture (rgb) or a sensor image: depth, normals or ids\n"
+                      << "                       (keys 1 to 4 switch while running)\n"
+                      << "  --snapshot FILE.ppm  save one frame and exit, without opening a window\n";
             return arg == "--help" ? 0 : 1;
         }
     }
@@ -276,7 +383,7 @@ int main(const int argc, char **argv) {
     }
 
     try {
-        return run(instance_count);
+        return run(instance_count, view, snapshot);
     } catch (const std::exception &e) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;
