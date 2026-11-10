@@ -84,8 +84,7 @@ rebuilding anything:
 gh workflow run release.yml --ref main -f pypi_tag=v0.4.0
 ```
 
-Once the first version is up, change the README's install line to `pip install neraulgraphics`.
-(Steps 2 and 3 are already done for this repository; only step 1, on pypi.org, needs your login.)
+This repository is set up: v0.4.0 was published this way, and later tags upload on their own.
 
 Two things to know. A PyPI version can never be replaced or reused: a bad upload can only be
 *yanked* (hidden from new installs), so look at the dry run's artifacts first. And the Linux

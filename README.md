@@ -25,15 +25,15 @@ sharpens the longer the camera holds still.
 ## Install
 
 ```bash
-pip install git+https://github.com/aneangel/neraulGraphics
+pip install neraulgraphics
 ```
 
-That builds from source, so it needs CMake and a C++17 compiler. If the CUDA toolkit is
-installed it also builds the GPU backend for your card; if not, it builds the CPU backend,
-which needs nothing else. Prebuilt wheels are on the
-[releases page](https://github.com/aneangel/neraulGraphics/releases): Linux x86_64 with the GPU
-backend (needing only the NVIDIA driver, and using the CPU if there is no GPU), and CPU-only
-for macOS (Apple Silicon), Windows and Linux aarch64.
+That installs a prebuilt wheel: Linux x86_64 with the GPU backend (needing only the NVIDIA
+driver, and using the CPU if there is no GPU), or CPU-only for macOS (Apple Silicon), Windows and
+Linux aarch64. On any other platform it builds from source, which needs CMake and a C++17 compiler;
+if the CUDA toolkit is installed it also builds the GPU backend for your card, and if not, the CPU
+backend, which needs nothing else. For the latest unreleased code:
+`pip install git+https://github.com/aneangel/neraulGraphics`.
 
 `neraulgraphics.cuda_available()` says whether a GPU will be used, and
 `ng.Renderer(..., device="cpu")` forces the CPU. At 1280x720 a 16-core CPU renders a

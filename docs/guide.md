@@ -221,7 +221,8 @@ now takes longer than drawing it.
 pip install neraulgraphics-0.4.0-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
 ```
 
-Wheels are on the [releases page](https://github.com/aneangel/neraulGraphics/releases).
+`pip install neraulgraphics` gets a wheel; the same files are on the
+[releases page](https://github.com/aneangel/neraulGraphics/releases).
 The Linux x86_64 ones carry the GPU backend: they need only an NVIDIA driver, not the CUDA
 toolkit, work on any NVIDIA GPU from the RTX 20-series on, and use the CPU if there is no GPU.
 There are CPU-only wheels for macOS, Windows and Linux aarch64. Or build from source, which
