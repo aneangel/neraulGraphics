@@ -218,7 +218,7 @@ now takes longer than drawing it.
 ## Use it from Python
 
 ```bash
-pip install neraulgraphics-0.2.0-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+pip install neraulgraphics-0.3.0-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
 ```
 
 Wheels are on the [releases page](https://github.com/aneangel/neraulGraphics/releases).
@@ -227,7 +227,7 @@ from the RTX 20-series on. Or build from source, which needs the CUDA toolkit an
 compiles for the GPU in the machine you build on:
 
 ```bash
-pip install git+https://github.com/aneangel/neraulGraphics@v0.2.0
+pip install git+https://github.com/aneangel/neraulGraphics@v0.3.0
 ```
 
 Then:
@@ -273,7 +273,7 @@ cmake --install build --prefix ~/.local
 Then, in your project's `CMakeLists.txt`:
 
 ```cmake
-find_package(neraulgraphics 0.2 REQUIRED)
+find_package(neraulgraphics 0.3 REQUIRED)
 target_link_libraries(my_app PRIVATE neraulgraphics::core)
 ```
 
@@ -284,7 +284,7 @@ installing and pull a release straight from GitHub:
 include(FetchContent)
 FetchContent_Declare(neraulgraphics
     GIT_REPOSITORY https://github.com/aneangel/neraulGraphics.git
-    GIT_TAG v0.2.0)
+    GIT_TAG v0.3.0)
 FetchContent_MakeAvailable(neraulgraphics)
 ```
 

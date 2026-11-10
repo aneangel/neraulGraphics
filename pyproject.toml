@@ -9,6 +9,8 @@ dynamic = ["version"]
 description = "A CUDA raytracer you can call from Python or C++"
 readme = "README.md"
 requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [{ name = "Anthony Angeles" }]
 dependencies = ["numpy>=1.22"]
 classifiers = [

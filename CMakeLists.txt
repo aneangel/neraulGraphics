@@ -23,7 +23,7 @@ endif()
 
 # The one place the version is written. version.h, the find_package version file,
 # the Python package metadata and neraulgraphics.__version__ all read it from here.
-project(neraulgraphics VERSION 0.2.0 LANGUAGES CXX CUDA)
+project(neraulgraphics VERSION 0.3.0 LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

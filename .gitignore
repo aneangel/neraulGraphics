@@ -8,6 +8,7 @@
 
 # ...and un-ignore only what defines the project.
 !/.gitignore
+!/LICENSE
 !/CMakeLists.txt
 !/Makefile
 !/src/**

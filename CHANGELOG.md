@@ -6,9 +6,12 @@ without one, and uses the section as the release notes.
 Versions follow [semantic versioning](https://semver.org). Before 1.0, a minor
 version (0.x.0) may change the API.
 
-## [Unreleased]
+## [0.3.0]
+
+Triangle meshes and dynamic scenes.
 
 ### Added
+- Apache-2.0 license.
 - Triangle meshes. `Mesh` is geometry, built into a BVH once; `Instance` places a
   mesh with its own `Transform` and `Material`. The number of instances is not
   capped, unlike spheres. Pass them to `Renderer(..., meshes, instances)`.
