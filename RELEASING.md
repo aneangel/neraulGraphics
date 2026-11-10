@@ -76,8 +76,16 @@ stored anywhere. It is off until you set it up once, and then it is automatic:
    (Optionally require your approval there, so a tag cannot upload without you clicking.)
 3. In *Settings > Secrets and variables > Actions > Variables*, add `PUBLISH_TO_PYPI` = `true`.
 
-From the next tag on, the `pypi` job runs after the GitHub Release succeeds. Once the first version
-is up, change the README's install line to `pip install neraulgraphics`.
+From the next tag on, the `pypi` job runs after the GitHub Release succeeds. To put a version that
+is already released on PyPI (v0.4.0 was tagged before this existed), upload its files without
+rebuilding anything:
+
+```bash
+gh workflow run release.yml --ref main -f pypi_tag=v0.4.0
+```
+
+Once the first version is up, change the README's install line to `pip install neraulgraphics`.
+(Steps 2 and 3 are already done for this repository; only step 1, on pypi.org, needs your login.)
 
 Two things to know. A PyPI version can never be replaced or reused: a bad upload can only be
 *yanked* (hidden from new installs), so look at the dry run's artifacts first. And the Linux

@@ -14,6 +14,11 @@ on:
   push:
     tags: ["v*.*.*"]
   workflow_dispatch:
+    inputs:
+      pypi_tag:
+        description: "Leave empty for a dry run. Or a release tag (such as v0.4.0) whose files are already on GitHub, to upload just those to PyPI."
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -21,6 +26,7 @@ permissions:
 jobs:
   # Refuses to release unless the tag, CMakeLists.txt and CHANGELOG.md agree.
   check-version:
+    if: inputs.pypi_tag == ''
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -139,3 +145,21 @@ jobs:
           path: dist
           merge-multiple: true
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  # Uploads the files of a release that already exists on GitHub, with no rebuild: for a version
+  # tagged before PyPI was set up. Run it from Actions > release > Run workflow, giving the tag.
+  pypi-existing:
+    if: inputs.pypi_tag != ''
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - name: Download the release's files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release download "${{ inputs.pypi_tag }}" --dir dist --pattern "*.whl" --pattern "*.tar.gz"
+      - run: ls -l dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
