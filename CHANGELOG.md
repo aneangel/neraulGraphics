@@ -29,7 +29,7 @@ version (0.x.0) may change the API.
 - `sim.beauty(sky=None, **settings)` and `sim.classic()` on the Newton and MuJoCo adapters (the sky follows
   the simulator's up axis). The glTF loader passes roughness, metallic and emission through.
 - Viewer: `--beauty` and the `B` key.
-- `examples/beauty_render.py`.
+- `examples/beauty_render.py`, a path-traced scene you can fly around, and `examples/batch_render.py` now opens a window with live worlds. Both fall back to writing a picture when there is no display.
 
 ### Fixed
 - `examples/batch_render.py` crashed on a GPU machine without PyTorch: it asked for zero-copy output that nothing could read.
