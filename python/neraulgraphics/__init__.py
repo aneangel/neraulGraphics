@@ -38,6 +38,7 @@ inside CUDA raises neraulgraphics.CudaError.
 """
 
 from . import physics
+from .smoke import Smoke
 from .loaders import LoadedScene, SceneRenderer, load, load_gltf, load_obj
 from .sky import load_hdr, procedural_sky
 from ._core import (
@@ -72,6 +73,7 @@ from ._core import (
 )
 
 __all__ = [
+    "Smoke",
     "physics",
     "LoadedScene",
     "SceneRenderer",

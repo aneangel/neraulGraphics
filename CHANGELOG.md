@@ -9,10 +9,20 @@ version (0.x.0) may change the API.
 ## [Unreleased]
 
 ### Added
+- Articulated people (`examples/scenery/characters.py`): humanoids of ellipsoid segments walked by forward kinematics (hip, knee, shoulder
+  and elbow swing, the pelvis solved so the lower foot is on the ground), tested for constant bone lengths, joints that stay joined, feet on
+  the ground, speed, arms against legs, and non-degenerate matrices.
 - `neraulgraphics.physics`: a rigid-body world whose results are bit-identical on any CPU, operating system and thread count. Jolt
   Physics built for cross-platform determinism solves the contacts, and nothing else changes the simulation. `state_hash()` fingerprints
   every body's exact state. Built only with `-C cmake.define.NERAULGRAPHICS_BUILD_PHYSICS=ON` (it fetches Jolt). A golden hash in
   `tests/test_physics.py` enforces it; `docs/guide.md` says what is and is not guaranteed.
+- `neraulgraphics.Smoke`: dust as a volume. Particles are splatted as Gaussian blobs of optical depth, composited with Beer-Lambert absorption
+  and hidden by a ray cast when they are behind a surface, so clouds are translucent where spheres were opaque.
+- Procedural surface textures (`examples/scenery/textures.py`): brick with per-brick tone and mortar, speckled asphalt, stained concrete and
+  stucco, seamless and made in 0.1 s with numpy; textured boxes carry uvs in real-world units. (Tests caught a stray factor of two that had
+  drawn every texture at double size.)
+- A street scene (`examples/scenery/street.py`): sidewalk, lane markings, parked cars, lamp posts, barriers, flanking buildings with lit
+  and dark windows, a skyline, and an overcast atmosphere, laid out around any structure's footprint.
 - Physics validation (`tests/test_physics_validation.py`): free fall, projectiles, friction on slopes, restitution, conservation of momentum
   and energy, torque-free spin and no energy gain. It found that Jolt's default body damping (5 % of velocity a second)
   acts as drag in a vacuum; the world now defaults it to zero.
