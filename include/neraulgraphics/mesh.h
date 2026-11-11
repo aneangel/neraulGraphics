@@ -35,6 +35,8 @@ struct Texture {
     int width = 0;
     int height = 0;
     std::vector<uint8_t> rgba;  // width * height * 4 bytes
+    // Data, not colour: a normal map or a roughness map. The bytes are used as they are (0..255 is 0..1), without the sRGB decode.
+    bool linear = false;
 };
 
 // Rotation as a unit quaternion, vector part first (x, y, z, w), the order Warp,
@@ -68,6 +70,13 @@ struct Instance {
     // multiplied into material.diffuse_color, so a textured material usually wants a white
     // diffuse_color. The mesh must have uvs.
     int texture = -1;
+    // A tangent-space normal map (a texture made with linear = true): red is +u, green is up the image, blue is out of the surface,
+    // each 0..255 for -1..1. The mesh needs uvs. Fine detail in the shading without fine geometry.
+    int normal_texture = -1;
+    // Occlusion, roughness and metal in the red, green and blue of a linear texture, as glTF packs them. Roughness and metal
+    // multiply the material's values (or stand in for them when the material derives them); occlusion darkens the diffuse colour.
+    // Path tracing uses roughness and metal; the classic renderer ignores them. The mesh needs uvs.
+    int orm_texture = -1;
 };
 
 // An axis-aligned box centred on the origin, 12 triangles.

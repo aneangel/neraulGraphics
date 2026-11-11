@@ -118,9 +118,13 @@ NG_FN bool scene_intersect(const SceneParams &s, const int world, const float3 &
 
     if (best_instance >= 0) {
         float3 tint;
-        mesh_surface(s.mesh, best_instance, best_triangle, best_u, best_v, dir, hit.normal, tint);
+        float rough_tex, metal_tex;
+        mesh_surface(s.mesh, best_instance, best_triangle, best_u, best_v, dir, hit.normal, tint, rough_tex, metal_tex);
         hit.material = s.mesh.instances[best_instance].material;
         hit.material.diffuse_color = hit.material.diffuse_color * tint;
+        // a roughness or metal map multiplies the material's value, or stands in for it when the material derives its own (negative)
+        if (rough_tex >= 0.0f) hit.material.roughness = rough_tex * (hit.material.roughness >= 0.0f ? hit.material.roughness : 1.0f);
+        if (metal_tex >= 0.0f) hit.material.metallic = metal_tex * (hit.material.metallic >= 0.0f ? hit.material.metallic : 1.0f);
         hit.object = OBJECT_INSTANCE + (best_instance - world * s.mesh.instances_per_world);  // the same in every world
     } else if (hit_floor) {
         hit.object = OBJECT_FLOOR;

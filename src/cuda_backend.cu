@@ -712,7 +712,7 @@ private:
         sampler.addressMode[1] = cudaAddressModeWrap;
         sampler.filterMode = cudaFilterModeLinear;
         sampler.readMode = cudaReadModeNormalizedFloat;
-        sampler.sRGB = 1;  // decoded to linear light before filtering, which is what blending needs
+        sampler.sRGB = tex.linear ? 0 : 1;  // colour is decoded to linear light before filtering, which is what blending needs; data is not
         sampler.normalizedCoords = 1;
         cudaTextureObject_t object = 0;
         CUDA_CHECK(cudaCreateTextureObject(&object, &resource, &sampler, nullptr));
@@ -744,6 +744,8 @@ private:
                 records[i].inv[row] = make_float4(r.inv[4 * row], r.inv[4 * row + 1], r.inv[4 * row + 2], r.inv[4 * row + 3]);
             records[i].blas_root = r.blas_root;
             records[i].texture = r.texture;
+            records[i].normal_texture = r.normal_texture;
+            records[i].orm_texture = r.orm_texture;
             records[i].material = device::to_device(r.material);
         }
         CUDA_CHECK(cudaMemcpy(d_instances_, records.data(), n * sizeof(device::Instance), cudaMemcpyHostToDevice));

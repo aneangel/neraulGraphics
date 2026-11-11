@@ -9,6 +9,10 @@ version (0.x.0) may change the API.
 ## [Unreleased]
 
 ### Added
+- Normal maps and occlusion/roughness/metal maps. `Instance(normal_texture=, orm_texture=)` and `Texture(image, linear=True)` for data that must not
+  be sRGB-decoded. A tangent frame is built from the triangle's uvs inside `mesh_surface`, the one function both backends share, so the CPU and
+  CUDA backends draw them identically (tested). Roughness and metal reach the path tracer, occlusion darkens the diffuse colour. The street
+  scene's brick has relief and mortar occlusion, and its asphalt has wet, smoother patches that mirror the sky.
 - Articulated people (`examples/scenery/characters.py`): humanoids of ellipsoid segments walked by forward kinematics (hip, knee, shoulder
   and elbow swing, the pelvis solved so the lower foot is on the ground), tested for constant bone lengths, joints that stay joined, feet on
   the ground, speed, arms against legs, and non-degenerate matrices.

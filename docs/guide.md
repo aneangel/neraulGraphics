@@ -264,6 +264,45 @@ Save it with any image library, for example `PIL.Image.fromarray(image).save("ou
 Vectors can be tuples, lists or numpy arrays. A mistake in the scene raises
 `ValueError` saying what is wrong.
 
+## Normal, roughness and occlusion maps
+
+```python
+colour = ng.Texture(brick_rgb)                       # sRGB colour, as before
+normal = ng.Texture(normal_rgb, linear=True)         # data: red +u, green up the image, blue out of the surface
+orm = ng.Texture(orm_rgb, linear=True)               # glTF packing: red occlusion, green roughness, blue metal
+renderer = ng.Renderer(w, h, [], lights, meshes=[wall], instances=[ng.Instance(0, texture=0, normal_texture=1, orm_texture=2)],
+                       textures=[colour, normal, orm])
+```
+
+The mesh needs uvs. A normal map bends the shading normal inside a frame built from the triangle's uvs; roughness and metal multiply
+the material's values (or stand in for them) under path tracing, and occlusion darkens the diffuse colour. `linear=True` matters: a normal
+map decoded as sRGB colour is wrong. Both backends share the code, so the CPU and the GPU draw the same.
+
+## Physics that gives the same answer everywhere
+
+```python
+from neraulgraphics import physics
+
+world = physics.World()
+world.add_ground()
+body = world.add_convex_hull(corners, position=(0, 0, 3))        # corners: (n, 3) float32
+world.finish_setup()
+for frame in range(240):
+    world.step(1 / 120, substeps=4)
+print(world.poses()[body], hex(world.state_hash()))
+```
+
+A `World` is Jolt Physics built for cross-platform determinism (strict IEEE arithmetic, no fused multiply-adds, its own `sin`, `cos`
+and `atan2`; our own code is compiled with `-ffp-contract=off`). The same bodies with the same `dt` and substeps give the same bits in
+`poses()` on any CPU and with any thread count, so a server and its clients can run the same simulation and send each other only
+inputs, and `state_hash()` lets them check that they agree. The module is built only with
+`pip install -C cmake.define.NERAULGRAPHICS_BUILD_PHYSICS=ON .` (it fetches Jolt); `physics.available()` says whether it is there.
+
+What is not guaranteed: a different `dt`, substep count or solver iteration count is a different simulation (each is repeatable, they
+do not agree with each other), and another Jolt version or a compiler flag that changes floating-point behaviour can change the bits.
+The golden hash in `tests/test_physics.py` is the alarm for that. Rendering makes the weaker promise of the same picture to within about
+0.1/255, not the same bits: GPUs of different vendors cannot trace rays bit-identically.
+
 ## Use it from C++
 
 The renderer is a library, `neraulgraphics::core`, with no window or SDL attached.
@@ -280,7 +319,7 @@ cmake --install build --prefix ~/.local
 Then, in your project's `CMakeLists.txt`:
 
 ```cmake
-find_package(neraulgraphics 0.4 REQUIRED)
+find_package(neraulgraphics 0.5 REQUIRED)
 target_link_libraries(my_app PRIVATE neraulgraphics::core)
 ```
 

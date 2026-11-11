@@ -78,6 +78,12 @@ void check_meshes(const std::vector<Mesh> &meshes, const std::vector<Instance> &
             std::to_string(textures.size()) + " textures");
         require(inst.texture < 0 || !meshes[inst.mesh].uvs.empty(),
             name + " has a texture, but its mesh " + std::to_string(inst.mesh) + " has no uvs");
+        for (const auto &[map, label] : {std::pair<int, const char *>{inst.normal_texture, "normal_texture"}, {inst.orm_texture, "orm_texture"}}) {
+            require(map >= -1 && map < static_cast<int>(textures.size()),
+                name + " " + label + " is " + std::to_string(map) + ", but there are " + std::to_string(textures.size()) + " textures");
+            require(map < 0 || !meshes[inst.mesh].uvs.empty(),
+                name + " has a " + label + ", but its mesh " + std::to_string(inst.mesh) + " has no uvs");
+        }
         check_material(inst.material, name + " material");
     }
 }

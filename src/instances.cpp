@@ -19,6 +19,8 @@ InstanceSet::InstanceSet(const BuiltMeshes &built, const std::vector<Instance> &
             if (w == 0) mesh_.push_back(instances[i].mesh);
             InstanceRecord &r = records[w * per_world_ + i];
             r.texture = instances[i].texture;
+            r.normal_texture = instances[i].normal_texture;
+            r.orm_texture = instances[i].orm_texture;
             r.material = instances[i].material;
             matrices.insert(matrices.end(), instances[i].transform.m, instances[i].transform.m + 12);
         }

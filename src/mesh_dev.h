@@ -30,6 +30,8 @@ struct Instance {
     float4 inv[3];   // world -> mesh space, top three rows; only the inverse is needed on the device
     int blas_root;   // root of this instance's mesh in the shared node array
     int texture;     // index into MeshScene::textures, or -1
+    int normal_texture;  // a tangent-space normal map, or -1
+    int orm_texture;     // occlusion (r), roughness (g), metal (b), or -1
     Material material;
 };
 
@@ -230,8 +232,11 @@ NG_FN bool mesh_occluded(const MeshScene &m, const int world, const float3 &o, c
 // its columns. With vertex normals the normal is interpolated, so a coarse mesh shades
 // smooth; the geometric normal then only decides which side faces the viewer. With a
 // texture and uvs, the tint is the texture colour at the hit and white otherwise.
+//
+// A normal map bends the shading normal inside a tangent frame built from the triangle's uvs (u along +x of the map, up the image along
+// +y), and an ORM map gives roughness and metal (rough_tex and metal_tex, -1 when there is none) and darkens the tint by occlusion.
 NG_FN void mesh_surface(const MeshScene &m, const int instance, const int triangle, const float hit_u,
-    const float hit_v, const float3 &dir, float3 &normal, float3 &tint) {
+    const float hit_v, const float3 &dir, float3 &normal, float3 &tint, float &rough_tex, float &metal_tex) {
     const Instance &inst = m.instances[instance];
     const float3 r0 = xyz3(inst.inv[0]), r1 = xyz3(inst.inv[1]), r2 = xyz3(inst.inv[2]);
 
@@ -240,6 +245,8 @@ NG_FN void mesh_surface(const MeshScene &m, const int instance, const int triang
     if (dot(geometric, dir) > 0.0f) geometric = -geometric;  // face the viewer
     normal = geometric;
     tint = make_float3(1.0f, 1.0f, 1.0f);
+    rough_tex = -1.0f;
+    metal_tex = -1.0f;
 
     if (m.attributes == nullptr) return;
     const float4 a0 = m.attributes[4 * triangle], a1 = m.attributes[4 * triangle + 1];
@@ -254,11 +261,45 @@ NG_FN void mesh_surface(const MeshScene &m, const int instance, const int triang
             normal = dot(smooth, geometric) < 0.0f ? -smooth : smooth;
         }
     }
-    if ((flags & ATTR_UVS) && inst.texture >= 0) {
-        const float u = a0.w * w0 + a1.w * hit_u + a2.w * hit_v;
-        const float v = a3.x * w0 + a3.y * hit_u + a3.z * hit_v;
+    if (!(flags & ATTR_UVS)) return;
+    const float u = a0.w * w0 + a1.w * hit_u + a2.w * hit_v;
+    const float v = a3.x * w0 + a3.y * hit_u + a3.z * hit_v;
+    if (inst.texture >= 0) {
         const float4 c = sample_texture(m.textures[inst.texture], u, v);  // sRGB -> linear, bilinear, repeating
         tint = make_float3(c.x, c.y, c.z);
+    }
+    if (inst.orm_texture >= 0) {
+        const float4 o = sample_texture(m.textures[inst.orm_texture], u, v);  // linear data
+        tint = tint * o.x;
+        rough_tex = o.y;
+        metal_tex = o.z;
+    }
+    if (inst.normal_texture >= 0) {
+        // dP/du and -dP/dv (up the image) in mesh space, from the triangle's edges and the change of uv along them
+        const float3 e1 = xyz3(m.triangles[3 * triangle + 1]), e2 = xyz3(m.triangles[3 * triangle + 2]);
+        const float du1 = a1.w - a0.w, dv1 = a3.y - a3.x, du2 = a2.w - a0.w, dv2 = a3.z - a3.x;
+        const float det = du1 * dv2 - du2 * dv1;
+        if (fabsf(det) > 1e-12f) {
+            const float inv_det = 1.0f / det;
+            const float3 t_mesh = (e1 * dv2 - e2 * dv1) * inv_det;
+            const float3 b_mesh = (e2 * du1 - e1 * du2) * (-inv_det);
+            // mesh space to world is the inverse of the stored world -> mesh matrix: its columns are the cross products of its rows
+            const float3 c0 = cross(r1, r2), c1 = cross(r2, r0), c2 = cross(r0, r1);
+            const float d = dot(r0, c0);
+            const float inv_d = 1.0f / (fabsf(d) < 1e-20f ? copysignf(1e-20f, d) : d);
+            float3 t = (c0 * t_mesh.x + c1 * t_mesh.y + c2 * t_mesh.z) * inv_d;
+            float3 b = (c0 * b_mesh.x + c1 * b_mesh.y + c2 * b_mesh.z) * inv_d;
+            t = t - normal * dot(normal, t);
+            if (dot(t, t) > 1e-20f) {
+                t = normalize(t);
+                b = b - normal * dot(normal, b) - t * dot(t, b);
+                b = dot(b, b) > 1e-20f ? normalize(b) : cross(normal, t);
+                const float4 s = sample_texture(m.textures[inst.normal_texture], u, v);  // linear data
+                const float3 n_ts = make_float3(2.0f * s.x - 1.0f, 2.0f * s.y - 1.0f, 2.0f * s.z - 1.0f);
+                const float3 bent = t * n_ts.x + b * n_ts.y + normal * n_ts.z;
+                if (dot(bent, bent) > 1e-12f) normal = normalize(bent);
+            }
+        }
     }
 }
 

@@ -21,6 +21,8 @@ struct InstanceRecord {
     float inv[12];  // world -> mesh space, top three rows of the 4x4, row-major
     int blas_root;  // root of this instance's mesh in BuiltMeshes::nodes
     int texture;    // index into the textures, or -1
+    int normal_texture;  // a tangent-space normal map, or -1
+    int orm_texture;     // occlusion, roughness and metal maps, or -1
     Material material;
 };
 

@@ -580,10 +580,14 @@ NB_MODULE(_core, m) {
         "An image that instances can be painted with. Colour is sRGB, as in a PNG or JPEG; the "
         "renderer converts to linear light when it samples, and filters bilinearly. uvs outside "
         "0..1 repeat.")
-        .def("__init__", [](Texture *self, const Pixels &image) { new (self) Texture(make_texture(image)); },
-            "image"_a,
+        .def("__init__", [](Texture *self, const Pixels &image, const bool linear) {
+                new (self) Texture(make_texture(image));
+                self->linear = linear;
+            },
+            "image"_a, "linear"_a = false,
             "image: a (height, width, channels) uint8 array with 1 (grey), 3 (RGB) or 4 (RGBA) "
-            "channels, rows from the top.")
+            "channels, rows from the top. linear=True marks data, such as a normal map or an occlusion/roughness/metal map: "
+            "its bytes are used as they are, where colour is sRGB-decoded.")
         .def_ro("width", &Texture::width)
         .def_ro("height", &Texture::height)
         .def("__repr__", [](const Texture &t) {
@@ -599,14 +603,19 @@ NB_MODULE(_core, m) {
         "what it is made of.")
         .def("__init__",
             [](Instance *self, const int mesh, const Transform &transform, const Material &material,
-                const int texture) { new (self) Instance{mesh, transform, material, texture}; },
+                const int texture, const int normal_texture, const int orm_texture) {
+                new (self) Instance{mesh, transform, material, texture, normal_texture, orm_texture};
+            },
             "mesh"_a, "transform"_a = identity_transform(),
             "material"_a = Material{{0.8f, 0.8f, 0.8f}, 0.9f, 0.1f, 0.0f, 50.0f}, "texture"_a = -1,
+            "normal_texture"_a = -1, "orm_texture"_a = -1,
             "texture: index into the Renderer's textures, or -1 for none. The texture colour is "
             "multiplied into the material's diffuse_color, so a textured material usually wants "
             "diffuse_color=(1, 1, 1). The mesh needs uvs.")
         .def_rw("mesh", &Instance::mesh)
         .def_rw("texture", &Instance::texture)
+        .def_rw("normal_texture", &Instance::normal_texture)
+        .def_rw("orm_texture", &Instance::orm_texture)
         .def_rw("transform", &Instance::transform)
         .def_rw("material", &Instance::material)
         .def("__repr__", [](const Instance &i) {

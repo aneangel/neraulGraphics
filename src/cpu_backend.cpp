@@ -41,12 +41,22 @@ const float *srgb_table() {
     return table.data();
 }
 
+// Bytes to 0..1, for data textures.
+const float *linear_table() {
+    static const std::vector<float> table = [] {
+        std::vector<float> t(256);
+        for (int i = 0; i < 256; ++i) t[i] = static_cast<float>(i) / 255.0f;
+        return t;
+    }();
+    return table.data();
+}
+
 }  // namespace
 
 // Repeating, bilinear, sRGB-decoded before filtering, texel centres at half-integers: the same
 // as the GPU's texture sampler with normalized coordinates and linear filtering.
 float4 sample_texture(const TextureHandle texture, const float u, const float v) {
-    const float *decode = srgb_table();
+    const float *decode = texture->linear ? linear_table() : srgb_table();
     const int w = texture->width, h = texture->height;
     // Wrap into [0, size) before turning into an index, so a huge coordinate cannot overflow an int.
     const float x = u * static_cast<float>(w) - 0.5f, y = v * static_cast<float>(h) - 0.5f;
@@ -129,7 +139,7 @@ public:
         for (const Texture &t : scene.textures) texture_bytes_.push_back(t.rgba);
         for (size_t i = 0; i < scene.textures.size(); ++i)
             texture_data_.push_back(host::CpuTexture{scene.textures[i].width, scene.textures[i].height,
-                texture_bytes_[i].data()});
+                texture_bytes_[i].data(), scene.textures[i].linear});
         for (const host::CpuTexture &t : texture_data_) texture_handles_.push_back(&t);
 
         if (scene.built != nullptr) {
@@ -432,6 +442,8 @@ private:
                 records_[i].inv[row] = host::make_float4(r.inv[4 * row], r.inv[4 * row + 1], r.inv[4 * row + 2], r.inv[4 * row + 3]);
             records_[i].blas_root = r.blas_root;
             records_[i].texture = r.texture;
+            records_[i].normal_texture = r.normal_texture;
+            records_[i].orm_texture = r.orm_texture;
             records_[i].material = host::to_device(r.material);
         }
         // An update can reallocate the node array, so the pointers the trace reads must follow it.

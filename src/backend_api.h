@@ -51,6 +51,7 @@ struct CpuTexture {
     int width;
     int height;
     const uint8_t *rgba;  // width * height * 4, rows from the top
+    bool linear;          // data (a normal map, say) rather than colour: no sRGB decode
 };
 using TextureHandle = const CpuTexture *;
 
