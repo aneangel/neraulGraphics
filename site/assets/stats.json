@@ -1,0 +1,63 @@
+{
+  "machine": {
+    "gpu": "NVIDIA GeForce RTX 5090",
+    "resolution": "1920x1080",
+    "neraulgraphics": "0.5.0",
+    "note": "medians over the frames of each stage, measured while rendering the video"
+  },
+  "stress-instances": {
+    "1000": {
+      "update_ms": 0.661,
+      "render_ms": 1.986,
+      "frames": 96,
+      "fps": 377.8
+    },
+    "10000": {
+      "update_ms": 3.531,
+      "render_ms": 2.743,
+      "frames": 96,
+      "fps": 159.4
+    },
+    "50000": {
+      "update_ms": 16.053,
+      "render_ms": 3.109,
+      "frames": 96,
+      "fps": 52.2
+    },
+    "100000": {
+      "update_ms": 32.158,
+      "render_ms": 3.369,
+      "frames": 96,
+      "fps": 28.1
+    },
+    "200000": {
+      "update_ms": 74.576,
+      "render_ms": 3.413,
+      "frames": 96,
+      "fps": 12.8
+    }
+  },
+  "stress-batch": {
+    "1024": {
+      "view": "240x240",
+      "call_ms": 2.874,
+      "images_per_second": 356298,
+      "frames": 199
+    },
+    "4096": {
+      "view": "120x120",
+      "call_ms": 3.563,
+      "images_per_second": 1149593,
+      "frames": 161
+    }
+  },
+  "stress-path": {
+    "12000": {
+      "update_ms": 4.157,
+      "render_ms": 19.756,
+      "frames": 270,
+      "fps": 41.8,
+      "settings": "3 bounces, 2 samples per pixel, denoised"
+    }
+  }
+}

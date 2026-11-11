@@ -44,6 +44,8 @@ cmake.version = ">=3.28"
 # Kept between builds, so a second pip install only recompiles what changed.
 build-dir = "build/{wheel_tag}"
 wheel.packages = ["python/neraulgraphics"]
+# The web page and its video are for GitHub Pages; the source archive does not need them.
+sdist.exclude = ["site", "tools"]
 # The module is built for the stable ABI, so on Python 3.12+ one wheel serves
 # every later version. Older Pythons get a wheel of their own.
 wheel.py-api = "cp312"

@@ -10,6 +10,8 @@ Hand it a scene and a camera, get an image back. Every pixel is traced with real
 rays, so mirrors, shadows and reflections work without tricks, and the picture
 sharpens the longer the camera holds still.
 
+**[Watch the showcase video and see the stress tests](https://aneangel.github.io/neraulGraphics/)**: beauty mode, 100,000 moving instances, thousands of worlds at once, and Newton and MuJoCo scenes, all rendered by the engine itself.
+
 ## Features
 
 - **Runs anywhere.** An NVIDIA GPU is used automatically when present; otherwise every CPU core is. Same picture either way, on Linux, macOS and Windows.

@@ -23,6 +23,8 @@
 !/CHANGELOG.md
 !/RELEASING.md
 !/docs/**
+!/site/**
+!/tools/**
 
 # Build trees: re-ignored as whole directories so git doesn't walk them at all.
 /build/

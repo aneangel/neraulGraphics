@@ -8,6 +8,10 @@ version (0.x.0) may change the API.
 
 ## [Unreleased]
 
+### Added
+- A web page with a showcase video and the measured stress tests (`site/`, published to GitHub Pages by `.github/workflows/pages.yml`).
+  `tools/showcase/make_video.py` renders the video from the engine itself and writes the measurements it quotes.
+
 ## [0.5.0] - 2026-11-10
 
 ### Added
