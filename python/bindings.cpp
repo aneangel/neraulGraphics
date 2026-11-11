@@ -151,12 +151,26 @@ Transform transform_from_matrix(const Matrix &m) {
     return t;
 }
 
+void check_instance_count(PyRenderer &self, const size_t given) {
+    if (given != static_cast<size_t>(self.renderer.instance_count()))
+        throw std::invalid_argument("expected " + std::to_string(self.renderer.instance_count()) +
+            " transforms, one per instance, got " + std::to_string(given));
+}
+
 void set_instance_transforms(PyRenderer &self, const Matrices &matrices) {
-    std::vector<Transform> transforms(matrices.shape(0));
-    std::memcpy(transforms.data(), matrices.data(), matrices.shape(0) * 12 * sizeof(float));
+    check_instance_count(self, matrices.shape(0));
     nb::gil_scoped_release release;
     std::lock_guard<std::mutex> lock(self.mutex);
-    self.renderer.set_instance_transforms(transforms);
+    self.renderer.set_instance_matrices(matrices.data(), Memory::Host);
+}
+
+using DeviceMatrices = nb::ndarray<const float, nb::shape<-1, 3, 4>, nb::c_contig, nb::device::cuda>;
+
+void set_instance_transforms_device(PyRenderer &self, const DeviceMatrices &matrices) {
+    check_instance_count(self, matrices.shape(0));
+    nb::gil_scoped_release release;
+    std::lock_guard<std::mutex> lock(self.mutex);
+    self.renderer.set_instance_matrices(matrices.data(), Memory::Device);
 }
 
 void set_instance_transform_list(PyRenderer &self, const std::vector<Transform> &transforms) {
@@ -778,6 +792,11 @@ NB_MODULE(_core, m) {
             "Move the instances: an (N, 3, 4) float array, one 3x4 matrix per instance in the "
             "order they were given. Only the small BVH over instances is updated, so this is the "
             "cheap per-frame call for a simulation. Render with frame=0 afterwards.")
+        .def("set_instance_transforms", &set_instance_transforms_device, "transforms"_a,
+            "The same from a CUDA array (a Warp array, a PyTorch tensor, anything with DLPack): the matrices are "
+            "used where they are and the trees over the instances are rebuilt on the GPU, with no copy through the "
+            "CPU. That needs a renderer on a GPU. The array is not checked, since checking would copy it back, so "
+            "keep every matrix finite and invertible.")
         .def("set_instance_transforms", &set_instance_transform_list, "transforms"_a,
             "The same, from a list of Transform objects.")
         .def_prop_ro("instance_count", [](PyRenderer &self) { return self.renderer.instance_count(); })

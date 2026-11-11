@@ -113,8 +113,25 @@ void Renderer::set_instance_transforms(const std::vector<Transform> &transforms)
         throw std::invalid_argument("expected " + std::to_string(r.instances) +
             " transforms, one per instance, got " + std::to_string(transforms.size()));
     for (size_t i = 0; i < transforms.size(); ++i)
-        detail::check_transform(transforms[i], "transform " + std::to_string(i));
+        // The message is only built for the one that fails: building it for every matrix cost more than the checking.
+        if (!detail::transform_ok(transforms[i])) detail::check_transform(transforms[i], "transform " + std::to_string(i));
     if (!transforms.empty()) r.backend->set_instance_transforms(transforms);
+}
+
+void Renderer::set_instance_matrices(const float *matrices, const Memory memory) {
+    Impl &r = state();
+    require(r.backend->device() == Device::Cuda || memory == Memory::Host,
+        "device pointers need a CUDA renderer; this one runs on the CPU");
+    if (r.instances == 0) return;
+    require(matrices != nullptr, "matrices must not be null");
+    if (memory == Memory::Host) {
+        for (int i = 0; i < r.instances; ++i) {
+            Transform t;
+            for (int k = 0; k < 12; ++k) t.m[k] = matrices[12 * static_cast<size_t>(i) + k];
+            if (!detail::transform_ok(t)) detail::check_transform(t, "transform " + std::to_string(i));
+        }
+    }
+    r.backend->set_instance_matrices(matrices, memory);
 }
 
 int Renderer::instance_count() const { return state().instances; }

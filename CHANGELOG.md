@@ -9,8 +9,15 @@ version (0.x.0) may change the API.
 ## [Unreleased]
 
 ### Added
+- `Renderer.set_instance_matrices` (C++) and `Renderer.set_instance_transforms` taking a CUDA array (Python): a simulator's poses go to
+  the trees over the instances straight from GPU memory, with no copy through the CPU. Handing over 9,000 bodies took 3.2 ms through the
+  CPU and 0.4 ms this way.
 - A web page with a showcase video and the measured stress tests (`site/`, published to GitHub Pages by `.github/workflows/pages.yml`).
   `tools/showcase/make_video.py` renders the video from the engine itself and writes the measurements it quotes.
+
+### Changed
+- `Renderer.set_instance_transforms` checks its matrices without building an error message for each one: 9,000 instances took
+  3.0 ms and now take 0.5 ms.
 
 ## [0.5.0] - 2026-11-10
 

@@ -241,6 +241,13 @@ public:
     // the instance count or a transform is NaN, infinite or singular.
     void set_instance_transforms(const std::vector<Transform> &transforms);
 
+    // The same from instance_count() matrices of 12 floats each: the top three rows of the 4x4, row-major, in the order
+    // of the instances. In host memory they are checked like set_instance_transforms. In device memory (a CUDA
+    // renderer only) they are used where they are, so a simulator's poses can go from its own GPU arrays to the
+    // trees over the instances with no copy; that is not checked, since checking would copy it back, so keep every
+    // matrix finite and invertible.
+    void set_instance_matrices(const float *matrices, Memory memory = Memory::Host);
+
     int instance_count() const;
 
     // The device this Renderer traces on: Cuda or Cpu, never Auto.
