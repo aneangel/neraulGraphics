@@ -1,0 +1,4 @@
+# Latest stable releases as of 2026-11-11 (PyPI, pre-releases excluded). One isolated env per competitor set.
+mujoco==4.0.0
+mujoco-warp==4.0.0
+warp-lang==1.19.0

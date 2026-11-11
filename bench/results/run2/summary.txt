@@ -1,0 +1,47 @@
+Environment
+  mjwarp: NVIDIA GeForce RTX 5090, 615.71.10, python 3.12.12, mujoco==4.0.0, mujoco-warp==4.0.0, warp-lang==1.19.0
+  ours: NVIDIA GeForce RTX 5090, 615.71.10, python 3.12.12, neraulgraphics==0.5.0, mujoco==4.0.0, warp-lang==1.19.0
+  mjwarp: GPU clock at end of each case, median 92% of max (min 91%)
+  ours: GPU clock at end of each case, median 91% of max (min 91%)
+
+=== 8 bodies per world
+  identical poses replayed by every run: yes (9d001df567e36412)
+  same picture drawn: yes (silhouette IoU >= 1.00000, depth p99 diff 0.0013 mm, 0 of 61373 shared pixels differ by more than 1 mm)
+  worlds  res   MJWarp default              MJWarp best         ours ms [95% CI]  vs default   vs best MJWarp [95% CI]  verdict
+      64   32       0.0911 ms     0.0911 [ 0.0909, 0.0915]     0.1205 [ 0.1204, 0.1205]   0.76x    0.76x [0.75,0.76] r0.75-0.77 native      ours slower
+      64   64       0.1289 ms     0.0941 [ 0.0941, 0.0942]     0.1345 [ 0.1344, 0.1346]   0.96x    0.70x [0.70,0.70] r0.70-0.70 cheap       ours slower
+      64  128       0.2889 ms     0.1920 [ 0.1919, 0.1921]     0.1832 [ 0.1831, 0.1834]   1.58x    1.05x [1.05,1.05] r1.04-1.05 cheap       ours faster
+     256   32       0.1436 ms     0.0995 [ 0.0995, 0.0996]     0.1307 [ 0.1306, 0.1309]   1.10x    0.76x [0.76,0.76] r0.76-0.76 cheap       ours slower
+     256   64       0.3388 ms     0.2215 [ 0.2214, 0.2215]     0.1955 [ 0.1953, 0.1955]   1.73x    1.13x [1.13,1.13] r1.13-1.14 cheap       ours faster
+     256  128       1.0065 ms     0.6092 [ 0.6089, 0.6095]     0.3678 [ 0.3677, 0.3679]   2.74x    1.66x [1.66,1.66] r1.65-1.66 cheap       ours faster
+    1024   32       0.4150 ms     0.2498 [ 0.2497, 0.2499]     0.2613 [ 0.2612, 0.2614]   1.59x    0.96x [0.96,0.96] r0.95-0.96 cheap       ours slower
+    1024   64       1.2045 ms     0.6979 [ 0.6977, 0.6981]     0.4747 [ 0.4745, 0.4750]   2.54x    1.47x [1.47,1.47] r1.47-1.47 cheap       ours faster
+    1024  128       3.9097 ms     2.2372 [ 2.2366, 2.2377]     1.1176 [ 1.1174, 1.1181]   3.50x    2.00x [2.00,2.00] r2.00-2.00 cheap       ours faster
+    4096   32       1.4834 ms     0.8341 [ 0.8334, 0.8346]     0.5870 [ 0.5868, 0.5872]   2.53x    1.42x [1.42,1.42] r1.42-1.42 cheap       ours faster
+    4096   64       4.6429 ms     2.6483 [ 2.6335, 2.6624]     1.4055 [ 1.4039, 1.4072]   3.30x    1.88x [1.87,1.89] r1.88-1.89 cheap       ours faster
+    4096  128      15.4160 ms     9.0674 [ 8.8748, 9.1796]     4.0413 [ 4.0307, 4.0491]   3.81x    2.24x [2.20,2.27] r2.24-2.28 cheap       ours faster
+  speedup = MJWarp ms / ours ms, so above 1 means neraulgraphics is faster. 'MJWarp default' is the matched-work configuration;
+  'MJWarp best' is its fastest of the default and tuned variants for that case (tuned ones skip shading that neraulgraphics does).
+  The bracketed intervals resample back-to-back repetitions and are optimistic; the r<min>-<max> range is the spread between
+  independent rounds against the best MJWarp variant, the better measure of repeatability.
+
+=== 32 bodies per world
+  identical poses replayed by every run: yes (c19e05ddc8e87df9)
+  same picture drawn: yes (silhouette IoU >= 0.99985, depth p99 diff 0.0017 mm, 0 of 200859 shared pixels differ by more than 1 mm)
+  worlds  res   MJWarp default              MJWarp best         ours ms [95% CI]  vs default   vs best MJWarp [95% CI]  verdict
+      64   32       0.1478 ms     0.1049 [ 0.1049, 0.1049]     0.1520 [ 0.1520, 0.1521]   0.97x    0.69x [0.69,0.69] r0.69-0.69 bd256       ours slower
+      64   64       0.3096 ms     0.2111 [ 0.2111, 0.2111]     0.1887 [ 0.1885, 0.1888]   1.64x    1.12x [1.12,1.12] r1.11-1.12 bd256       ours faster
+      64  128       0.8567 ms     0.5315 [ 0.5312, 0.5318]     0.3226 [ 0.3224, 0.3228]   2.66x    1.65x [1.65,1.65] r1.65-1.65 cheap       ours faster
+     256   32       0.3578 ms     0.2348 [ 0.2347, 0.2349]     0.2422 [ 0.2421, 0.2423]   1.48x    0.97x [0.97,0.97] r0.97-0.97 cheap       ours slower
+     256   64       1.0091 ms     0.6127 [ 0.6117, 0.6138]     0.4099 [ 0.4098, 0.4101]   2.46x    1.49x [1.49,1.50] r1.49-1.50 cheap       ours faster
+     256  128       3.2419 ms     1.8949 [ 1.8917, 1.8957]     0.8977 [ 0.8953, 0.9017]   3.61x    2.11x [2.10,2.12] r2.10-2.12 cheap       ours faster
+    1024   32       1.1742 ms     0.6884 [ 0.6882, 0.6885]     0.4858 [ 0.4853, 0.4862]   2.42x    1.42x [1.42,1.42] r1.42-1.42 cheap       ours faster
+    1024   64       3.8233 ms     2.2183 [ 2.2180, 2.2188]     1.1248 [ 1.1243, 1.1253]   3.40x    1.97x [1.97,1.97] r1.97-1.97 cheap       ours faster
+    1024  128      13.1940 ms     7.3250 [ 7.1529, 7.4729]     3.0241 [ 2.9947, 3.0602]   4.34x    2.42x [2.36,2.47] r2.41-2.46 cheap       ours faster
+    4096   32       4.4761 ms     2.5219 [ 2.5026, 2.5254]     1.4607 [ 1.4546, 1.4669]   3.06x    1.73x [1.71,1.73] r1.72-1.73 cheap       ours faster
+    4096   64      15.2818 ms     8.7934 [ 8.6194, 8.9062]     3.9754 [ 3.9595, 4.0611]   3.83x    2.20x [2.15,2.24] r2.19-2.24 cheap       ours faster
+    4096  128      52.7850 ms    30.7933 [30.4897,31.0778]    12.0280 [11.6771,12.4888]   4.39x    2.56x [2.46,2.65] r2.56-2.58 cheap       ours faster
+  speedup = MJWarp ms / ours ms, so above 1 means neraulgraphics is faster. 'MJWarp default' is the matched-work configuration;
+  'MJWarp best' is its fastest of the default and tuned variants for that case (tuned ones skip shading that neraulgraphics does).
+  The bracketed intervals resample back-to-back repetitions and are optimistic; the r<min>-<max> range is the spread between
+  independent rounds against the best MJWarp variant, the better measure of repeatability.

@@ -25,6 +25,7 @@
 !/docs/**
 !/site/**
 !/tools/**
+!/bench/**
 
 # Build trees: re-ignored as whole directories so git doesn't walk them at all.
 /build/
@@ -34,3 +35,7 @@
 /.idea/
 __pycache__/
 *.egg-info/
+
+# Benchmark inputs and images that run_all.sh regenerates.
+/bench/data/
+/bench/results/**/*.npz

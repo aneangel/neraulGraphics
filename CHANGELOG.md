@@ -66,6 +66,11 @@ version (0.x.0) may change the API.
 - `Renderer.set_instance_matrices` (C++) and `Renderer.set_instance_transforms` taking a CUDA array (Python): a simulator's poses go to
   the trees over the instances straight from GPU memory, with no copy through the CPU. Handing over 9,000 bodies took 3.2 ms through the
   CPU and 0.4 ms this way.
+- Benchmarks against MuJoCo Warp (`bench/`, protocol in `bench/README.md`): MuJoCo 4.0.0, MuJoCo Warp 4.0.0 and Warp 1.19.0 pinned in their own
+  environment, both renderers handed the same triangles, poses, camera and image size and set to the same rays per pixel, and a check that they
+  draw the same picture before any speed is reported. On one RTX 5090, against MuJoCo Warp's default settings neraulgraphics is faster in 21 of
+  24 cases (1.1x to 4.4x); against its fastest settings, which do less work, in 18 of 24 (1.05x to 2.6x), and slower in the six smallest batches.
+  Render only, no physics in the timer.
 - A web page with a showcase video and the measured stress tests (`site/`, published to GitHub Pages by `.github/workflows/pages.yml`).
   `tools/showcase/make_video.py` renders the video from the engine itself and writes the measurements it quotes.
 

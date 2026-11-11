@@ -1,0 +1,4 @@
+# neraulgraphics as a user would install it, plus the same Warp and MuJoCo the competitors use (the adapter needs both).
+neraulgraphics==0.5.0
+mujoco==4.0.0
+warp-lang==1.19.0
