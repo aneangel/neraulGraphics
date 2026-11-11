@@ -9,6 +9,10 @@ version (0.x.0) may change the API.
 ## [Unreleased]
 
 ### Added
+- **White-furnace tests** (`tests/test_furnace.py`): a convex object in a uniform environment has an exactly known appearance. They found that rough metals
+  lost energy (a white metal at roughness 0.6 returned 81 % of the light, 0.8 54 %, 1.0 29 %) and fixed it with multiple-scattering compensation fitted to
+  this renderer's own BRDF (now 100 % to 98 % up to 0.8 and 92 % at 1.0; `tools/rendering/single_scatter_albedo.py`), and that output used a plain 2.2 power in
+  place of the sRGB curve (shadows came out too dark; now exact sRGB).
 - Moving, shaped lights. `Renderer.set_lights(lights)` replaces a scene's lights between frames (a torch that follows a camera). `Light` gains
   `falloff` (intensity / (1 + (d / falloff)^2), a lamp), `direction`, `spot_angle` and `spot_softness` (a spotlight with a smooth cone) and
   `color` (a warm torch or a flame). All default to what a plain light was, so existing scenes draw identically; classic and path-traced

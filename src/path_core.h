@@ -45,6 +45,7 @@ NG_FN float3 cosine_hemisphere_sample(const float u1, const float u2) {
 struct Surface {
     float3 albedo;   // diffuse reflectance (none for a metal)
     float3 f0;       // specular reflectance looking straight at the surface
+    float roughness; // perceptual roughness, for the multiple-scattering compensation
     float alpha;     // GGX roughness squared: 0 is a mirror
     float spec_prob; // how often a bounce is sampled from the specular lobe, rather than the diffuse
 };
@@ -67,6 +68,7 @@ NG_FN Surface make_surface(const Material &m) {
     const float dielectric = (explicit_pbr || m.specular_albedo > 0.0f) ? 0.04f : 0.0f;
     s.f0 = lerp(make_float3(dielectric, dielectric, dielectric), tint, metallic);
     s.albedo = base * (1.0f - metallic);
+    s.roughness = roughness;
     s.alpha = fmaxf(roughness * roughness, 0.002f);  // a perfectly smooth lobe has no finite sampling density
     const float spec_w = max_component(s.f0), diff_w = max_component(s.albedo);
     if (spec_w < 1e-4f) s.spec_prob = 0.0f;
@@ -89,6 +91,22 @@ NG_FN float ggx_visibility(const float nol, const float nov, const float a2) {
 
 NG_FN float ggx_g1(const float nov, const float a2) { return 2.0f * nov / (nov + sqrtf(a2 + (1.0f - a2) * nov * nov)); }
 
+// The fraction of light a white GGX surface (F0 = 1) reflects towards the viewer at cosine nov, counting only light that scatters once off
+// the microfacets: a polynomial fit (4 x 4, within 0.019 of the integral everywhere and 0.003 on average) to the expectation of G2 / G1
+// over visible-normal samples of this very BRDF, computed with tools/rendering/single_scatter_albedo.py. It is below 1 for a rough surface
+// because light that bounces a second time between microfacets is not counted, which is what makes single-scattering rough metals too dark.
+NG_FN float single_scatter_albedo(const float nov, const float roughness) {
+    const float m = fminf(fmaxf(nov, 0.05f), 1.0f);
+    const float r = fminf(fmaxf(roughness, 0.1f), 1.0f);          // below 0.1 the lobe is nearly a mirror and the albedo nearly 1
+    const float p0 = 1.1588385f + m * (-0.2434899f + m * (-1.9937967f + m * (4.4454591f + m * -2.3415755f)));
+    const float p1 = -3.1011066f + m * (15.9027169f + m * (-14.3536701f + m * (-9.7754813f + m * 10.7972369f)));
+    const float p2 = 11.1633026f + m * (-80.4498132f + m * (143.2939255f + m * (-79.8227469f + m * 8.9758152f)));
+    const float p3 = -14.4848248f + m * (117.5458419f + m * (-252.2666243f + m * (190.6101952f + m * -48.2041842f)));
+    const float p4 = 6.2187773f + m * (-55.0192745f + m * (129.4373330f + m * (-109.3843620f + m * 32.2038979f)));
+    const float e = p0 + r * (p1 + r * (p2 + r * (p3 + r * p4)));
+    return fminf(fmaxf(e, 0.05f), 1.0f);
+}
+
 // The material's BRDF for light arriving from wi and leaving towards wo (both unit, away from the surface), and
 // the probability density with which brdf_sample would have chosen wi. Zero for directions below the surface.
 NG_FN float3 brdf_eval(const Surface &s, const float3 &n, const float3 &wo, const float3 &wi, float &pdf) {
@@ -105,7 +123,11 @@ NG_FN float3 brdf_eval(const Surface &s, const float3 &n, const float3 &wo, cons
     // Light that reflects specularly does not also scatter diffusely.
     const float3 diffuse = s.albedo * (make_float3(1.0f, 1.0f, 1.0f) - fresnel) * (1.0f / PI);
     pdf = s.spec_prob * (ggx_g1(nov, a2) * d / (4.0f * nov)) + (1.0f - s.spec_prob) * nol * (1.0f / PI);
-    return diffuse + fresnel * (d * vis);
+    // Multiple scattering (Turquin 2019): the light that bounces more than once between microfacets is put back by scaling the lobe by
+    // 1 + F0 (1 / E - 1), E being the single-scattering albedo; it is exact for a white metal and small for a dielectric.
+    const float inv_e = 1.0f / single_scatter_albedo(nov, s.roughness) - 1.0f;
+    const float3 compensation = make_float3(1.0f + s.f0.x * inv_e, 1.0f + s.f0.y * inv_e, 1.0f + s.f0.z * inv_e);
+    return diffuse + fresnel * compensation * (d * vis);
 }
 
 // Picks a direction wi for light leaving towards wo, from the diffuse or the specular lobe. The specular lobe is

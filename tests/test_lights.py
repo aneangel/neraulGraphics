@@ -96,8 +96,9 @@ def floor_scene(device):
 
 
 def linear(value):
-    """A display value (0..255, gamma encoded) back to linear light, so that ratios of light can be compared."""
-    return (value / 255.0) ** 2.2
+    """A display value (0..255, sRGB encoded) back to linear light, so that ratios of light can be compared."""
+    v = value / 255.0
+    return v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
 
 
 def added(renderer, camera, light):

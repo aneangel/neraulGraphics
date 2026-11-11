@@ -164,9 +164,15 @@ GPU_FN float3 tonemap_aces(const float3 &x) {
 }
 
 // Linear to display gamma. Apply last, after any tone mapping.
+// The sRGB transfer function: a linear toe below 0.0031308 and a 1/2.4 power above, which is what displays and the texture sampler
+// (see sample_texture) use. A plain 2.2 power is close in the middle but darkens the shadows.
+GPU_FN float srgb_channel(const float v) {
+    const float x = saturate(v);
+    return x <= 0.0031308f ? 12.92f * x : 1.055f * fast_pow(x, 1.0f / 2.4f) - 0.055f;
+}
+
 GPU_FN float3 linear_to_srgb(const float3 &c) {
-    const float g = 1.0f / 2.2f;
-    return make_float3(fast_pow(saturate(c.x), g), fast_pow(saturate(c.y), g), fast_pow(saturate(c.z), g));
+    return make_float3(srgb_channel(c.x), srgb_channel(c.y), srgb_channel(c.z));
 }
 
 // Pack to SDL_PIXELFORMAT_ARGB8888.
