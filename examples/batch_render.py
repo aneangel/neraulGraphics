@@ -67,7 +67,8 @@ else:
 
 def step():
     renderer.set_instance_transforms(new_poses())
-    return renderer.render(cameras, fov=1.0, rgb=True, depth=True, object_ids=True, zero_copy=True)
+    # Views of the GPU's own buffers when PyTorch is there to take them; ordinary NumPy copies otherwise.
+    return renderer.render(cameras, fov=1.0, rgb=True, depth=True, object_ids=True, zero_copy=on_gpu)
 
 
 step()  # warm up

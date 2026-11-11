@@ -8,6 +8,8 @@ version (0.x.0) may change the API.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-10
+
 ### Added
 - Beauty mode: path tracing. `Renderer.set_render_mode(RenderMode.PathTraced, PathTracing(...))` draws
   light bouncing between surfaces with soft shadows, sky lighting and physically based materials
@@ -27,6 +29,10 @@ version (0.x.0) may change the API.
 - `sim.beauty(sky=None, **settings)` and `sim.classic()` on the Newton and MuJoCo adapters (the sky follows
   the simulator's up axis). The glTF loader passes roughness, metallic and emission through.
 - Viewer: `--beauty` and the `B` key.
+- `examples/beauty_render.py`.
+
+### Fixed
+- `examples/batch_render.py` crashed on a GPU machine without PyTorch: it asked for zero-copy output that nothing could read.
 - Batched worlds. `BatchRenderer` draws many worlds at once, each seen by its own camera(s) and
   holding the same instances placed differently, and returns `(views, H, W, ...)` batches of RGB,
   depth, normals and object IDs. Poses (`set_instance_transforms`, or simulator body poses through
