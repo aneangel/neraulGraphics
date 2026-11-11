@@ -137,3 +137,107 @@ def procedural_sky(
         irradiance_per_radiance = float((texel * (toward @ sun))[disc].sum())  # what unit radiance in the disc gives head-on
         image[disc] = sun_strength / irradiance_per_radiance
     return np.ascontiguousarray(image.astype(np.float32))
+
+
+# sRGB (linear) from CIE XYZ, D65
+_XYZ_TO_RGB = np.array([[3.2404542, -1.5371385, -0.4985314], [-0.9692660, 1.8760108, 0.0415560], [0.0556434, -0.2040259, 1.0572252]])
+
+
+def _perez(theta, gamma, a, b, c, d, e):
+    """The Perez sky distribution: how much brighter or bluer a direction is than the zenith, from its angle to the zenith and to the sun."""
+    return (1.0 + a * np.exp(b / np.maximum(np.cos(theta), 0.01))) * (1.0 + c * np.exp(d * gamma) + e * np.cos(gamma) ** 2)
+
+
+def physical_sky(
+    sun_elevation: float = 0.7,
+    sun_azimuth: float = 0.0,
+    turbidity: float = 2.5,
+    sun_strength: float = 3.0,
+    sun_radius: float = 0.0093,
+    sky_ratio: float = 0.2,
+    ground_albedo: float = 0.25,
+    width: int = 1024,
+    height: int = 512,
+) -> np.ndarray:
+    """A sky map from the Preetham daylight model (1999): the colour and brightness of a clear sky for a given sun height and haziness.
+
+    What it gets right that a plain gradient does not: the zenith is a deep blue and the horizon pale, the sky is brightest around the sun and
+    along the horizon, a hazier sky (higher turbidity, 2 is very clear and 6 is hazy) is whiter and brighter near the horizon, and a low sun
+    turns the sky and the sun itself orange and red, because light that crosses more air loses its blue.
+
+    sun_elevation is the sun's angle above the horizon in radians (at least 0.02), sun_strength the light the sun gives a surface facing it
+    (the units of a Light's intensity; the sun disc's colour is the atmosphere's transmittance, so a low sun is dimmer and redder), sun_radius
+    the disc's radius in radians (the real sun's is 0.0047, and a larger disc is found more reliably at few samples). sky_ratio is how much
+    light the whole sky gives a horizontal surface, as a fraction of what the sun gives one facing it (about 0.15 to 0.3 for a clear sky).
+    Below the horizon the map is the ground, a diffuse surface of ground_albedo lit by the sun and the sky. Returns linear radiance,
+    (height, width, 3) float32, in the layout Environment(map=...) takes.
+    """
+    if not 0.02 <= sun_elevation <= math.pi / 2:
+        raise ValueError(f"sun_elevation must be between 0.02 and pi / 2, got {sun_elevation}")
+    if not 1.7 <= turbidity <= 10.0:
+        raise ValueError(f"turbidity must be between 1.7 and 10, got {turbidity}")
+    if not 0.0 < sun_radius < math.pi / 4 or sun_strength < 0.0 or sky_ratio < 0.0 or not 0.0 <= ground_albedo <= 1.0:
+        raise ValueError("sun_radius must be in (0, pi / 4); sun_strength and sky_ratio must not be negative; ground_albedo is 0 to 1")
+    if width < 8 or height < 4:
+        raise ValueError(f"the map must be at least 8x4, got {width}x{height}")
+
+    T = turbidity
+    theta_s = math.pi / 2 - sun_elevation                         # the sun's angle from the zenith
+    # Perez coefficients (A to E) for the luminance Y and the chromaticities x and y
+    coeff = {
+        "Y": (0.1787 * T - 1.4630, -0.3554 * T + 0.4275, -0.0227 * T + 5.3251, 0.1206 * T - 2.5771, -0.0670 * T + 0.3703),
+        "x": (-0.0193 * T - 0.2592, -0.0665 * T + 0.0008, -0.0004 * T + 0.2125, -0.0641 * T - 0.8989, -0.0033 * T + 0.0452),
+        "y": (-0.0167 * T - 0.2608, -0.0950 * T + 0.0092, -0.0079 * T + 0.2102, -0.0441 * T - 1.6537, -0.0109 * T + 0.0529),
+    }
+    t2, ts2, ts3 = T * T, theta_s ** 2, theta_s ** 3
+    chi = (4.0 / 9.0 - T / 120.0) * (math.pi - 2.0 * theta_s)
+    zenith_Y = (4.0453 * T - 4.9710) * math.tan(chi) - 0.2155 * T + 2.4192                    # kcd/m^2
+    zenith_x = (t2 * (0.00166 * ts3 - 0.00375 * ts2 + 0.00209 * theta_s) + T * (-0.02903 * ts3 + 0.06377 * ts2 - 0.03202 * theta_s + 0.00394)
+                + (0.11693 * ts3 - 0.21196 * ts2 + 0.06052 * theta_s + 0.25886))
+    zenith_y = (t2 * (0.00275 * ts3 - 0.00610 * ts2 + 0.00317 * theta_s) + T * (-0.04214 * ts3 + 0.08970 * ts2 - 0.04153 * theta_s + 0.00516)
+                + (0.15346 * ts3 - 0.26756 * ts2 + 0.06670 * theta_s + 0.26688))
+
+    theta = (np.arange(height) + 0.5) / height * math.pi            # from straight up
+    phi = (np.arange(width) + 0.5) / width * 2.0 * math.pi
+    sin_t, cos_t = np.sin(theta)[:, None], np.cos(theta)[:, None]
+    toward = np.stack([sin_t * np.cos(phi)[None, :], np.broadcast_to(cos_t, (height, width)), sin_t * np.sin(phi)[None, :]], axis=-1)
+    sun = np.array([math.cos(sun_elevation) * math.cos(sun_azimuth), math.sin(sun_elevation), math.cos(sun_elevation) * math.sin(sun_azimuth)])
+    gamma = np.arccos(np.clip(toward @ sun, -1.0, 1.0))             # the angle to the sun
+    th = np.broadcast_to(np.minimum(theta[:, None], math.pi / 2 - 1e-3), (height, width))
+
+    def channel(name, zenith):
+        a, b, c, d, e = coeff[name]
+        return zenith * _perez(th, gamma, a, b, c, d, e) / _perez(0.0, theta_s, a, b, c, d, e)
+
+    Y, x, y = channel("Y", zenith_Y), channel("x", zenith_x), channel("y", zenith_y)
+    X = x / np.maximum(y, 1e-6) * Y
+    Z = (1.0 - x - y) / np.maximum(y, 1e-6) * Y
+    sky = np.clip(np.stack([X, Y, Z], axis=-1) @ _XYZ_TO_RGB.T, 0.0, None)
+
+    # Scale so that the whole sky lights a horizontal surface with sky_ratio of the sun's strength: that fixes the sky's brightness against
+    # the sun's, whatever units the model's luminance is in.
+    solid_angle = (2.0 * math.pi / width) * (math.pi / height) * np.broadcast_to(sin_t, (height, width))
+    upper = (cos_t > 0.0)
+    dome = (sky.mean(axis=-1) * np.broadcast_to(np.maximum(cos_t, 0.0), (height, width)) * solid_angle * upper).sum()
+    sky_scale = sun_strength * sky_ratio / max(dome, 1e-9)
+    sky *= sky_scale
+
+    # The ground: a diffuse surface lit by the sun and the sky, seen from above.
+    ground_light = sun_strength * math.sin(sun_elevation) + sun_strength * sky_ratio
+    below = np.broadcast_to((cos_t < 0.0)[..., None], (height, width, 1))
+    image = np.where(below, np.array([ground_albedo * ground_light / math.pi] * 3), sky)
+
+    # The sun: the atmosphere's transmittance along the slant path (Kasten and Young's air mass; Rayleigh and aerosol optical depths for red,
+    # green and blue), relative to the zenith's so that a sun at the zenith has exactly sun_strength.
+    def transmittance(elevation):
+        air_mass = 1.0 / (math.sin(elevation) + 0.50572 * (math.degrees(elevation) + 6.07995) ** -1.6364)
+        wavelengths = np.array([0.65, 0.55, 0.45])
+        tau = 0.008735 * wavelengths ** -4.08 + (0.04608 * T - 0.04586) * wavelengths ** -1.3
+        return np.exp(-air_mass * tau)
+
+    sun_colour = transmittance(sun_elevation) / transmittance(math.pi / 2)
+    disc = toward @ sun > math.cos(sun_radius)
+    if disc.any() and sun_strength > 0.0:
+        texel_irradiance = float((solid_angle * (toward @ sun))[disc].sum())
+        image[disc] = sun_strength * sun_colour / texel_irradiance
+    return np.ascontiguousarray(image.astype(np.float32))

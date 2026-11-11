@@ -45,6 +45,14 @@ struct Material {
     float roughness = -1.0f;  // 0 is mirror-smooth and 1 fully rough. Classic: from specular_exponent
     float metallic = -1.0f;   // 0 is a dielectric (paint, plastic) and 1 a metal. Classic: reflectivity
     Vec3 emission = {0.0f, 0.0f, 0.0f};  // light the surface gives off, as radiance in linear units
+    // Glass, water, clear plastic: the fraction of the surface that is a smooth dielectric, which reflects and refracts light by the Fresnel
+    // equations and Snell's law (path tracing only; the classic renderer ignores it). 0 is opaque. A path chooses the glass at random in
+    // this proportion and otherwise scatters as the opaque material does, so 0.5 is a half-silvered pane. ior is the index of refraction
+    // (1.5 glass, 1.33 water, 2.4 diamond). Inside a closed mesh or a sphere the light is tinted by diffuse_color per metre travelled
+    // (Beer-Lambert), so (1, 1, 1) is clear and (0.6, 0.9, 0.7) a green bottle. The path needs bounces to spare: entering and leaving a
+    // ball costs two.
+    float transmission = 0.0f;
+    float ior = 1.5f;
 };
 
 inline Material make_material(const Vec3 color, const float kd, const float ks, const float kr,

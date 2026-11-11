@@ -9,6 +9,12 @@ version (0.x.0) may change the API.
 ## [Unreleased]
 
 ### Added
+- **Glass** (`Material.transmission`, `Material.ior`): a smooth dielectric with exact Fresnel reflection, refraction by Snell's law, total internal
+  reflection, medium tracking for closed solids and Beer-Lambert tinting by `diffuse_color`. Glass casts a light, tinted shadow (shadow rays pass through
+  it) and does not spend the path's bounce budget. A clear ball in a uniform environment returns exactly the environment, a ball lens inverts what is
+  behind it, and an index of 1 is invisible (`tests/test_glass.py`).
+- **`physical_sky`**: the Preetham daylight model with a sun that is attenuated by the atmosphere (a low sun is redder and dimmer), turbidity, a ground
+  lit by sun and sky, and the sun-to-sky ratio set from physics (`tests/test_sky.py`).
 - **White-furnace tests** (`tests/test_furnace.py`): a convex object in a uniform environment has an exactly known appearance. They found that rough metals
   lost energy (a white metal at roughness 0.6 returned 81 % of the light, 0.8 54 %, 1.0 29 %) and fixed it with multiple-scattering compensation fitted to
   this renderer's own BRDF (now 100 % to 98 % up to 0.8 and 92 % at 1.0; `tools/rendering/single_scatter_albedo.py`), and that output used a plain 2.2 power in

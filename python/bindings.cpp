@@ -385,13 +385,16 @@ NB_MODULE(_core, m) {
         .def("__init__",
             [](Material *self, const Vec3 &diffuse_color, const float diffuse_albedo,
                 const float specular_albedo, const float reflectivity,
-                const float specular_exponent, const float roughness, const float metallic, const Vec3 &emission) {
+                const float specular_exponent, const float roughness, const float metallic, const Vec3 &emission,
+                const float transmission, const float ior) {
                 new (self) Material{diffuse_color, diffuse_albedo, specular_albedo, reflectivity,
-                    specular_exponent, roughness, metallic, emission};
+                    specular_exponent, roughness, metallic, emission, transmission, ior};
             },
             "diffuse_color"_a = Vec3{0.8f, 0.8f, 0.8f}, "diffuse_albedo"_a = 0.9f,
             "specular_albedo"_a = 0.1f, "reflectivity"_a = 0.0f, "specular_exponent"_a = 50.0f,
-            "roughness"_a = -1.0f, "metallic"_a = -1.0f, "emission"_a = Vec3{0.0f, 0.0f, 0.0f},
+            "roughness"_a = -1.0f, "metallic"_a = -1.0f, "emission"_a = Vec3{0.0f, 0.0f, 0.0f}, "transmission"_a = 0.0f, "ior"_a = 1.5f,
+            "transmission: 0 is opaque, 1 is smooth glass (path tracing): it refracts by Snell's law with index ior, reflects by the Fresnel "
+            "equations, and inside a sphere or a closed mesh tints light by diffuse_color per metre. Give the path enough bounces.\n\n"
             "reflectivity: 0 is matte, 1 is a perfect mirror. specular_exponent: higher gives "
             "a smaller, sharper highlight.\n\n"
             "roughness, metallic and emission are the physically based parameters that path tracing uses "
@@ -408,6 +411,8 @@ NB_MODULE(_core, m) {
         .def_rw("roughness", &Material::roughness)
         .def_rw("metallic", &Material::metallic)
         .def_rw("emission", &Material::emission)
+        .def_rw("transmission", &Material::transmission)
+        .def_rw("ior", &Material::ior)
         .def("__repr__", &repr);
 
     nb::enum_<RenderMode>(m, "RenderMode", "How a picture is made.")

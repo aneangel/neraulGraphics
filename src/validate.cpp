@@ -17,7 +17,7 @@ bool finite(const Vec3 &v) { return finite(v.x) && finite(v.y) && finite(v.z); }
 bool finite(const Material &m) {
     return finite(m.diffuse_color) && finite(m.diffuse_albedo) && finite(m.specular_albedo) &&
         finite(m.reflectivity) && finite(m.specular_exponent) && finite(m.roughness) && finite(m.metallic) &&
-        finite(m.emission);
+        finite(m.emission) && finite(m.transmission) && finite(m.ior);
 }
 
 void check_material(const Material &m, const std::string &name) {
@@ -26,6 +26,8 @@ void check_material(const Material &m, const std::string &name) {
     require(m.roughness <= 1.0f, name + " roughness must be at most 1, got " + std::to_string(m.roughness));
     require(m.metallic <= 1.0f, name + " metallic must be at most 1, got " + std::to_string(m.metallic));
     require(m.emission.x >= 0.0f && m.emission.y >= 0.0f && m.emission.z >= 0.0f, name + " emission must not be negative");
+    require(m.transmission >= 0.0f && m.transmission <= 1.0f, name + " transmission must be 0 to 1, got " + std::to_string(m.transmission));
+    require(m.ior >= 1.0f && m.ior <= 4.0f, name + " ior must be 1 to 4, got " + std::to_string(m.ior));
 }
 
 void check_frame_size(const int width, const int height) {

@@ -40,7 +40,7 @@ inside CUDA raises neraulgraphics.CudaError.
 from . import physics
 from .smoke import Smoke
 from .loaders import LoadedScene, SceneRenderer, load, load_gltf, load_obj
-from .sky import load_hdr, procedural_sky
+from .sky import load_hdr, physical_sky, procedural_sky
 from ._core import (
     MAX_LIGHTS,
     MAX_SPHERES,
@@ -82,6 +82,7 @@ __all__ = [
     "load_obj",
     "load_hdr",
     "procedural_sky",
+    "physical_sky",
     "MAX_LIGHTS",
     "MAX_SPHERES",
     "OBJECT_FLOOR",

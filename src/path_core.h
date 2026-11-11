@@ -203,6 +203,30 @@ NG_FN bool sample_environment(const EnvParams &e, RNG &rng, float3 &dir, float3 
 
 // ----------------------------------------------------------- direct lighting --
 
+// How much of the light along a shadow ray gets through, per channel: 1 when nothing is in the way, 0 when something opaque is, and in
+// between when only glass is, which lets the light through tinted and slightly weakened (the Fresnel reflection off each face). The ray is
+// not bent by the glass, so this is a soft shadow without caustics, not a physical one: the focusing of light by a lens needs paths from
+// the light that this renderer does not trace. The any-hit test comes first, so an unshadowed point pays nothing for it.
+NG_FN float3 shadow_visibility(const SceneParams &s, const int world, float3 origin, const float3 &dir, const float reach) {
+    if (!scene_occluded(s, world, origin, dir, reach)) return make_float3(1.0f, 1.0f, 1.0f);
+    float3 visible = make_float3(1.0f, 1.0f, 1.0f);
+    float remaining = reach;
+    for (int crossing = 0; crossing < 8; ++crossing) {
+        Hit h;
+        if (!scene_intersect(s, world, origin, dir, h) || h.t >= remaining) return visible;
+        const Material &m = h.material;
+        if (m.transmission <= 0.0f) return make_float3(0.0f, 0.0f, 0.0f);
+        // the glass part of the surface passes light, minus the Fresnel reflection (about 4 % at each face), tinted by the glass
+        const float pass = m.transmission * 0.92f;
+        visible *= make_float3(pass * sqrtf(fmaxf(m.diffuse_color.x, 0.0f)), pass * sqrtf(fmaxf(m.diffuse_color.y, 0.0f)),
+            pass * sqrtf(fmaxf(m.diffuse_color.z, 0.0f)));
+        if (max_component(visible) < 1e-3f) return make_float3(0.0f, 0.0f, 0.0f);
+        remaining -= h.t + 2.0e-3f;
+        origin = h.point + dir * 2.0e-3f;
+    }
+    return visible;
+}
+
 // The power heuristic, which weighs two ways of sampling the same light by how well each suits the direction.
 NG_FN float power_heuristic(const float a, const float b) { return a * a / (a * a + b * b + 1e-30f); }
 
@@ -238,8 +262,9 @@ NG_FN float3 direct_from_lights(const SceneParams &s, const int world, const Hit
         float pdf;
         const float3 f = brdf_eval(surf, n, wo, wi, pdf);
         if (max_component(f) <= 0.0f) continue;
-        if (scene_occluded(s, world, offset_origin(hit.point, n, wi), wi, reach)) continue;
-        sum += f * l.color * (nol * PI * strength);
+        const float3 visible = shadow_visibility(s, world, offset_origin(hit.point, n, wi), wi, reach);
+        if (max_component(visible) <= 0.0f) continue;
+        sum += f * l.color * visible * (nol * PI * strength);
     }
     return sum;
 }
@@ -273,20 +298,61 @@ NG_FN float3 path_radiance(const SceneParams &s, const int world, float3 origin,
     float3 throughput = make_float3(1.0f, 1.0f, 1.0f);
     float prev_pdf = 0.0f;
     const bool sky_map = s.env.map != nullptr;
+    bool inside = false;            // the ray is inside a transmissive solid: it entered one and has not yet left
+    bool specular_bounce = false;   // the last bounce was a delta (glass): the sky was not sampled directly at it
+    float3 medium_tint = make_float3(1.0f, 1.0f, 1.0f);   // the glass the ray is travelling in, for Beer-Lambert absorption
+    int glass_events = 0;           // glass crossings do not count against the bounce budget, up to a limit
 
     for (int bounce = 0; bounce <= s.path.bounces; ++bounce) {
         Hit hit;
         if (!scene_intersect(s, world, origin, dir, hit)) {
             const float3 le = environment_radiance(s.env, dir);
             // With a map, the sky has also been sampled directly at each surface, so a path that happens to find it must not count it in full.
-            const float w = (bounce == 0 || !sky_map) ? 1.0f : power_heuristic(prev_pdf, environment_pdf(s.env, dir));
+            const float w = (bounce == 0 || !sky_map || specular_bounce) ? 1.0f : power_heuristic(prev_pdf, environment_pdf(s.env, dir));
             radiance += throughput * le * w;
             break;
+        }
+        // Light travelling through glass is absorbed along the way: Beer-Lambert, the tint raised to the distance in metres.
+        if (inside) {
+            throughput *= make_float3(powf(fmaxf(medium_tint.x, 1e-4f), hit.t), powf(fmaxf(medium_tint.y, 1e-4f), hit.t),
+                powf(fmaxf(medium_tint.z, 1e-4f), hit.t));
         }
         const Surface surf = make_surface(hit.material);
         radiance += throughput * hit.material.emission;
 
         const float3 wo = -dir;
+
+        // Glass: a smooth dielectric, chosen with probability `transmission` (and the opaque material otherwise). A delta lobe cannot
+        // be sampled from the lights, so there is no direct lighting here; the path reflects or refracts and goes on. Each choice
+        // carries the energy it should in its probability, so the throughput is unchanged.
+        if (hit.material.transmission > 0.0f && rand_float(rng) < hit.material.transmission) {
+            // A sphere's normal always points out; a mesh's is turned to face the viewer. Turn it here, to the side the ray arrives from.
+            const float3 n = dot(hit.normal, wo) >= 0.0f ? hit.normal : -hit.normal;
+            const float eta = inside ? hit.material.ior : 1.0f / hit.material.ior;   // index of the side the ray comes from over the other
+            const float cos_i = fminf(fmaxf(dot(n, wo), 0.0f), 1.0f);
+            const float sin2_t = eta * eta * (1.0f - cos_i * cos_i);
+            float fresnel = 1.0f;       // total internal reflection unless there is a transmitted ray
+            float cos_t = 0.0f;
+            if (sin2_t < 1.0f) {
+                cos_t = sqrtf(1.0f - sin2_t);
+                const float rs = (eta * cos_i - cos_t) / (eta * cos_i + cos_t);
+                const float rp = (cos_i - eta * cos_t) / (cos_i + eta * cos_t);
+                fresnel = 0.5f * (rs * rs + rp * rp);
+            }
+            if (rand_float(rng) < fresnel) {
+                dir = reflect(dir, n);
+                origin = offset_origin(hit.point, n, dir);
+            } else {
+                dir = normalize(dir * eta + n * (eta * cos_i - cos_t));
+                origin = offset_origin(hit.point, n, dir);
+                inside = !inside;
+                medium_tint = hit.material.diffuse_color;
+            }
+            specular_bounce = true;
+            if (glass_events < 12) { ++glass_events; --bounce; }    // not a bounce of the budget: the loop's increment puts it back
+            continue;
+        }
+        specular_bounce = false;
         float3 direct = direct_from_lights(s, world, hit, surf, wo, rng);
         if (sky_map) {
             float3 wi, le;
@@ -294,9 +360,11 @@ NG_FN float3 path_radiance(const SceneParams &s, const int world, float3 origin,
             if (sample_environment(s.env, rng, wi, le, pe) && dot(hit.normal, wi) > 0.0f) {
                 float pb;
                 const float3 f = brdf_eval(surf, hit.normal, wo, wi, pb);
-                if (max_component(f) > 0.0f && !scene_occluded(s, world, offset_origin(hit.point, hit.normal, wi), wi, 1e30f))
+                const float3 visible = max_component(f) > 0.0f ? shadow_visibility(s, world, offset_origin(hit.point, hit.normal, wi), wi, 1e30f)
+                                                               : make_float3(0.0f, 0.0f, 0.0f);
+                if (max_component(visible) > 0.0f)
                     // At the last vertex the path is not continued, so sampling the sky directly is the only strategy left: its weight is 1.
-                    direct += f * le * (dot(hit.normal, wi) / pe * (bounce == s.path.bounces ? 1.0f : power_heuristic(pe, pb)));
+                    direct += f * le * visible * (dot(hit.normal, wi) / pe * (bounce == s.path.bounces ? 1.0f : power_heuristic(pe, pb)));
             }
         }
         radiance += throughput * direct;
