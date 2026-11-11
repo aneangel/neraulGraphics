@@ -9,6 +9,13 @@ version (0.x.0) may change the API.
 ## [Unreleased]
 
 ### Added
+- `neraulgraphics.physics`: a rigid-body world whose results are bit-identical on any CPU, operating system and thread count. Jolt
+  Physics built for cross-platform determinism solves the contacts, and nothing else changes the simulation. `state_hash()` fingerprints
+  every body's exact state. Built only with `-C cmake.define.NERAULGRAPHICS_BUILD_PHYSICS=ON` (it fetches Jolt). A golden hash in
+  `tests/test_physics.py` enforces it; `docs/guide.md` says what is and is not guaranteed.
+- Physics validation (`tests/test_physics_validation.py`): free fall, projectiles, friction on slopes, restitution, conservation of momentum
+  and energy, torque-free spin and no energy gain. It found that Jolt's default body damping (5 % of velocity a second)
+  acts as drag in a vacuum; the world now defaults it to zero.
 - `Renderer.set_instance_matrices` (C++) and `Renderer.set_instance_transforms` taking a CUDA array (Python): a simulator's poses go to
   the trees over the instances straight from GPU memory, with no copy through the CPU. Handing over 9,000 bodies took 3.2 ms through the
   CPU and 0.4 ms this way.

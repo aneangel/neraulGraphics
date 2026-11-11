@@ -54,6 +54,7 @@ option(NERAULGRAPHICS_BUILD_VIEWER "Build the interactive SDL2 viewer" ${PROJECT
 option(NERAULGRAPHICS_BUILD_TESTS "Build the C++ tests (run with ctest)" ${PROJECT_IS_TOP_LEVEL})
 option(NERAULGRAPHICS_INSTALL "Generate install rules and the find_package config" ${PROJECT_IS_TOP_LEVEL})
 option(NERAULGRAPHICS_BUILD_PYTHON "Build the Python module (pip install . sets this)" OFF)
+option(NERAULGRAPHICS_BUILD_PHYSICS "Build the deterministic physics module, neraulgraphics._physics (needs the Python module; fetches Jolt Physics)" OFF)
 
 # Shared links libcudart.so, which the machine running the program must have.
 # Static bakes the runtime in and needs only the NVIDIA driver, which is what lets
@@ -194,6 +195,43 @@ if (NERAULGRAPHICS_BUILD_PYTHON)
         PYTHON_PATH $<TARGET_FILE_DIR:_core>
         DEPENDS _core)
     install(FILES ${CMAKE_CURRENT_BINARY_DIR}/_core.pyi DESTINATION neraulgraphics)
+
+    # The deterministic physics world. Jolt is built so that its results are bit-identical across machines: no fused multiply-adds,
+    # its own transcendental functions, and an instruction set no newer than SSE4.2 (so that a wheel runs on any x86-64 CPU of the
+    # last decade, and the answers do not depend on which one).
+    if (NERAULGRAPHICS_BUILD_PHYSICS)
+        include(FetchContent)
+        # Jolt is a static library that goes into a shared module.
+        set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+        set(CROSS_PLATFORM_DETERMINISTIC ON CACHE BOOL "" FORCE)
+        set(USE_AVX OFF CACHE BOOL "" FORCE)
+        set(USE_AVX2 OFF CACHE BOOL "" FORCE)
+        set(USE_AVX512 OFF CACHE BOOL "" FORCE)
+        set(USE_LZCNT OFF CACHE BOOL "" FORCE)
+        set(USE_TZCNT OFF CACHE BOOL "" FORCE)
+        set(USE_F16C OFF CACHE BOOL "" FORCE)
+        set(USE_FMADD OFF CACHE BOOL "" FORCE)
+        set(INTERPROCEDURAL_OPTIMIZATION OFF CACHE BOOL "" FORCE)
+        set(ENABLE_ALL_WARNINGS OFF CACHE BOOL "" FORCE)
+        set(GENERATE_DEBUG_SYMBOLS OFF CACHE BOOL "" FORCE)
+        set(PROFILER_IN_DEBUG_AND_RELEASE OFF CACHE BOOL "" FORCE)
+        set(DEBUG_RENDERER_IN_DEBUG_AND_RELEASE OFF CACHE BOOL "" FORCE)
+        set(JPH_USE_VK OFF CACHE BOOL "" FORCE)
+        set(JPH_USE_CPU_COMPUTE OFF CACHE BOOL "" FORCE)
+        FetchContent_Declare(JoltPhysics
+            GIT_REPOSITORY https://github.com/jrouwe/JoltPhysics
+            GIT_TAG v5.6.0
+            GIT_SHALLOW TRUE
+            SOURCE_SUBDIR Build)
+        FetchContent_MakeAvailable(JoltPhysics)
+        nanobind_add_module(_physics STABLE_ABI NB_STATIC python/physics.cpp)
+        target_link_libraries(_physics PRIVATE Jolt)
+        # Our own code must not contract a * b + c into a fused multiply-add either (GCC does so by default on some targets).
+        if (NOT MSVC)
+            target_compile_options(_physics PRIVATE -ffp-contract=off)
+        endif()
+        install(TARGETS _physics LIBRARY DESTINATION neraulgraphics)
+    endif()
 endif()
 
 # ---------------------------------------------------------------- install --

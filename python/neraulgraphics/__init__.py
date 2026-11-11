@@ -37,6 +37,7 @@ forces the CPU), drawing the same picture either way. Errors in the scene raise 
 inside CUDA raises neraulgraphics.CudaError.
 """
 
+from . import physics
 from .loaders import LoadedScene, SceneRenderer, load, load_gltf, load_obj
 from .sky import load_hdr, procedural_sky
 from ._core import (
@@ -71,6 +72,7 @@ from ._core import (
 )
 
 __all__ = [
+    "physics",
     "LoadedScene",
     "SceneRenderer",
     "load",
