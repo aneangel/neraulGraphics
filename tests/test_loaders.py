@@ -292,3 +292,11 @@ def test_loaded_scene_renders_without_arguments(tmp_path, gpu):
     view = scene.renderer(W, H)
     image = view.render()
     assert image.shape == (H, W, 3) and image.std() > 5  # the default camera sees the model
+
+
+def test_a_loaded_scene_keeps_the_box_round_its_geometry(tmp_path):
+    obj = tmp_path / "slab.obj"
+    obj.write_text("v -1 0 -2\nv 3 0 -2\nv 3 1 5\nv -1 1 5\nf 1 2 3\nf 1 3 4\n")
+    scene = ng.load(obj)
+    assert np.allclose(scene.bounds_min, (-1, 0, -2)) and np.allclose(scene.bounds_max, (3, 1, 5))
+    assert np.allclose(scene.center, (1.0, 0.5, 1.5))

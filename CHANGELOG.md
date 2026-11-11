@@ -19,6 +19,12 @@ version (0.x.0) may change the API.
   they reset it only when the light changes. On an orbiting camera in the materials scene the error against a converged picture fell 62 % (0.0316 to 0.0120).
   Documentation fix: a sky map's `sun_strength` is irradiance (a white diffuse surface facing it shows `sun_strength / pi`), while a `Light`'s intensity is that
   radiance, so the same sun as a `Light` has intensity `sun_strength / pi`; the old docstrings said the units were the same.
+- **Examples rebuilt around a live window** (`examples/README.md`, `python examples/run.py`): every example opens a real-time window (pyglet, GL texture
+  upload; a fly or orbit camera, mouse and keys), shows path-traced fidelity and shows physics, and writes a picture or GIF when there is no display.
+  New: `materials.py` (glass, metal and plastic under a physical sky, with balls and boxes to throw), a model viewer that drops what it shows,
+  `sensor_images.py` as six live panels over falling bodies, a self-contained MuJoCo humanoid, Newton shapes and the batch demo with real GPU dynamics.
+  Shared code is `examples/_live.py` and `examples/_stage.py`; every
+  example is run headless by `tests/test_examples.py`. Removed `examples/_viewer.py` (tkinter) and `examples/beauty_render.py` (superseded).
 - **Glass** (`Material.transmission`, `Material.ior`): a smooth dielectric with exact Fresnel reflection, refraction by Snell's law, total internal
   reflection, medium tracking for closed solids and Beer-Lambert tinting by `diffuse_color`. Glass casts a light, tinted shadow (shadow rays pass through
   it) and does not spend the path's bounce budget. A clear ball in a uniform environment returns exactly the environment, a ball lens inverts what is

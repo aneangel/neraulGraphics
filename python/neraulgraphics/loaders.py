@@ -56,6 +56,8 @@ class LoadedScene:
     up: tuple[float, float, float] = (0.0, 1.0, 0.0)  # both OBJ and glTF are normally Y-up
     center: np.ndarray = field(default_factory=lambda: np.zeros(3))  # of the placed geometry
     extent: float = 1.0                                              # half its diagonal
+    bounds_min: np.ndarray = field(default_factory=lambda: np.zeros(3))   # the axis-aligned box round the placed geometry
+    bounds_max: np.ndarray = field(default_factory=lambda: np.zeros(3))
 
     def renderer(self, width: int = 1280, height: int = 720, **kwargs) -> SceneRenderer:
         """A :class:`SceneRenderer` for this model, with a camera and lights chosen from its size."""
@@ -93,6 +95,7 @@ def _finish(scene: LoadedScene, mesh_bounds: list[tuple[np.ndarray, np.ndarray]]
         points = np.concatenate(corners)
         lo, hi = points.min(axis=0), points.max(axis=0)
         scene.center, scene.extent = (lo + hi) / 2.0, max(float(np.linalg.norm(hi - lo)) / 2.0, 1e-3)
+        scene.bounds_min, scene.bounds_max = lo, hi
     return scene
 
 

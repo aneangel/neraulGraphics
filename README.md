@@ -27,6 +27,19 @@ sharpens the longer the camera holds still.
 - **Interactive viewer** with free-fly camera: `make raytracer`.
 - **Clear errors.** Bad scenes raise `ValueError` (Python) or `std::invalid_argument` (C++) saying what is wrong, instead of crashing.
 
+## Try it
+
+Every example opens a live window (and writes a picture when there is no display): path-traced glass and metal under a physical sky that you can
+throw things into, a model viewer that drops what it shows, a Newton scene, a MuJoCo ragdoll, robot
+sensors, and thousands of simulated worlds at once.
+
+```bash
+python examples/run.py              # the list
+python examples/run.py materials    # the one to start with
+```
+
+See [examples/README.md](https://github.com/aneangel/neraulGraphics/blob/main/examples/README.md).
+
 ## Install
 
 ```bash
@@ -179,7 +192,7 @@ articulated humanoid renders in under a millisecond a frame. Runnable versions a
 C++:
 
 ```cmake
-find_package(neraulgraphics 0.4 REQUIRED)
+find_package(neraulgraphics 0.5 REQUIRED)
 target_link_libraries(my_app PRIVATE neraulgraphics::core)
 ```
 
