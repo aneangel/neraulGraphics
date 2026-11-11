@@ -678,7 +678,7 @@ private:
         device::path_trace_kernel<<<grid, block>>>(params_, d_noisy_, d_gbuf_[cur], d_albedo_, width_, height_, cam, frame, spp);
         const int valid_history = frame > 0 && have_prev_ ? 1 : 0;
         device::temporal_kernel<<<grid, block>>>(width_, height_, cam, prev_cam_, valid_history, d_noisy_, d_gbuf_[cur], d_gbuf_[old],
-            d_hist_[old], d_mom_[old], d_hist_[cur], d_mom_[cur], d_filt_[0], pt_.temporal_blend);
+            d_hist_[old], d_mom_[old], d_hist_[cur], d_mom_[cur], d_filt_[0], device::effective_blend(cam, prev_cam_, pt_.temporal_blend, pt_.moving_blend));
         const float4 *result = d_filt_[0];
         for (int i = 0, from = 0; i < pt_.denoise_iterations; ++i, from ^= 1) {
             device::atrous_kernel<<<grid, block>>>(width_, height_, d_filt_[from], d_filt_[from ^ 1], d_gbuf_[cur], 1 << i);

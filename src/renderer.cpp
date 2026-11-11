@@ -159,6 +159,8 @@ void Renderer::set_render_mode(const RenderMode mode, const PathTracing &p) {
     require(p.denoise_iterations >= 0 && p.denoise_iterations <= 8, "denoise_iterations must be 0 to 8, got " + std::to_string(p.denoise_iterations));
     require(finite(p.temporal_blend) && p.temporal_blend > 0.0f && p.temporal_blend <= 1.0f,
         "temporal_blend must be in (0, 1], got " + std::to_string(p.temporal_blend));
+    require(finite(p.moving_blend) && p.moving_blend > 0.0f && p.moving_blend <= 1.0f,
+        "moving_blend must be in (0, 1], got " + std::to_string(p.moving_blend));
     r.backend->set_render_mode(mode, p);
 }
 

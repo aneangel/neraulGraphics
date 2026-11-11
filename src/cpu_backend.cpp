@@ -396,12 +396,13 @@ private:
 
         // 2. Blend with last frame.
         const bool valid_history = frame > 0 && have_prev_;
+        const float blend = host::effective_blend(cam, prev_cam_, pt_.temporal_blend, pt_.moving_blend);
         parallel_chunks(h, 4, [&](const int y0, const int y1) {
             for (int y = y0; y < y1; ++y)
                 for (int x = 0; x < w; ++x)
                     host::temporal_accumulate_pixel(x, y, w, h, cam, prev_cam_, valid_history, noisy_.data(), gbuf_[cur].data(),
                         gbuf_[old].data(), hist_[old].data(), mom_[old].data(), hist_[cur].data(), mom_[cur].data(), filt_[0].data(),
-                        pt_.temporal_blend);
+                        blend);
         });
 
         // 3. Filter in space, each pass reaching twice as far as the one before.

@@ -103,8 +103,8 @@ def procedural_sky(
 
     sun_elevation is the sun's angle above the horizon in radians (0 to pi / 2) and sun_azimuth its
     angle round the up axis (turn the whole sky later with ``Environment(rotation=...)``). sun_strength
-    is the light the sun gives a surface facing it, in the same units as a Light's intensity, however
-    large its disc: sun_radius (radians; the real sun's is 0.0046) sets how wide the disc is and so how
+    is the irradiance the sun gives a surface facing it (a white diffuse surface facing it shows sun_strength / pi, which is the intensity of a Light that
+    does the same), however large its disc: sun_radius (radians; the real sun's is 0.0046) sets how wide the disc is and so how
     soft the shadows are. A larger disc is also found more reliably by the sampler at few samples.
     """
     if not (0.0 <= sun_elevation <= math.pi / 2):
@@ -148,6 +148,48 @@ def _perez(theta, gamma, a, b, c, d, e):
     return (1.0 + a * np.exp(b / np.maximum(np.cos(theta), 0.01))) * (1.0 + c * np.exp(d * gamma) + e * np.cos(gamma) ** 2)
 
 
+def _sun_transmittance(elevation: float, turbidity: float) -> np.ndarray:
+    """The fraction of the sun's red, green and blue that gets through the atmosphere at this elevation, relative to the zenith's."""
+    def transmittance(e):
+        air_mass = 1.0 / (math.sin(e) + 0.50572 * (math.degrees(e) + 6.07995) ** -1.6364)
+        wavelengths = np.array([0.65, 0.55, 0.45])
+        tau = 0.008735 * wavelengths ** -4.08 + (0.04608 * turbidity - 0.04586) * wavelengths ** -1.3
+        return np.exp(-air_mass * tau)
+
+    return transmittance(elevation) / transmittance(math.pi / 2)
+
+
+def environment_frame(up=(0.0, 1.0, 0.0)) -> np.ndarray:
+    """The frame the renderer gives an Environment with this up: rows (right, up, forward) as unit vectors in the world. A direction (x, y, z) in a
+    sky map's own layout (x along azimuth 0, y up, z along azimuth pi / 2) is the world direction x * right + y * up + z * forward. For up = +y
+    that is right = (0, 0, -1) and forward = (1, 0, 0), not the world's own x and z, which is why a sun placed by azimuth needs this."""
+    u = np.asarray(up, np.float64)
+    u = u / np.linalg.norm(u)
+    probe = np.array([0.0, 1.0, 0.0]) if abs(u[1]) < 0.9 else np.array([1.0, 0.0, 0.0])
+    r = np.cross(u, probe)
+    r /= np.linalg.norm(r)
+    return np.stack([r, u, np.cross(r, u)])
+
+
+def sun_light(sun_elevation: float = 0.7, sun_azimuth: float = 0.0, turbidity: float = 2.5, sun_strength: float = 3.0, sun_radius: float = 0.0093,
+              distance: float = 1000.0, up=(0.0, 1.0, 0.0)):
+    """The sun as an explicit Light, to go with physical_sky(..., include_sun=False): the same direction, the same strength (sun_strength is
+    the irradiance on a surface facing the sun, as in physical_sky; the Light's own intensity is that over pi, see below) and the same colour (the atmosphere's transmittance, so a low sun is redder). sun_radius is the disc's angular
+    radius in radians and sets how soft shadow edges are; distance only has to be far. up is the Environment's up: the sun's azimuth is
+    measured in the sky map's own frame (see environment_frame), so that the light sits where the map's sun would."""
+    from ._core import Light
+
+    if not 0.02 <= sun_elevation <= math.pi / 2:
+        raise ValueError(f"sun_elevation must be between 0.02 and pi / 2, got {sun_elevation}")
+    in_map = np.array([math.cos(sun_elevation) * math.cos(sun_azimuth), math.sin(sun_elevation), math.cos(sun_elevation) * math.sin(sun_azimuth)])
+    toward = in_map @ environment_frame(up)                                    # x * right + y * up + z * forward
+    colour = _sun_transmittance(sun_elevation, turbidity)
+    # A Light's intensity is the radiance a white diffuse surface facing it shows, which is the irradiance over pi; a sky map's sun_strength is
+    # the irradiance itself (a white surface facing it shows sun_strength / pi), so the same sun is a Light of intensity sun_strength / pi.
+    return Light(tuple(float(v) for v in toward * distance), intensity=float(sun_strength) / math.pi, radius=float(distance * math.tan(sun_radius)),
+                 color=tuple(float(c) for c in colour))
+
+
 def physical_sky(
     sun_elevation: float = 0.7,
     sun_azimuth: float = 0.0,
@@ -158,6 +200,7 @@ def physical_sky(
     ground_albedo: float = 0.25,
     width: int = 1024,
     height: int = 512,
+    include_sun: bool = True,
 ) -> np.ndarray:
     """A sky map from the Preetham daylight model (1999): the colour and brightness of a clear sky for a given sun height and haziness.
 
@@ -165,12 +208,18 @@ def physical_sky(
     along the horizon, a hazier sky (higher turbidity, 2 is very clear and 6 is hazy) is whiter and brighter near the horizon, and a low sun
     turns the sky and the sun itself orange and red, because light that crosses more air loses its blue.
 
-    sun_elevation is the sun's angle above the horizon in radians (at least 0.02), sun_strength the light the sun gives a surface facing it
-    (the units of a Light's intensity; the sun disc's colour is the atmosphere's transmittance, so a low sun is dimmer and redder), sun_radius
+    sun_elevation is the sun's angle above the horizon in radians (at least 0.02), sun_strength the irradiance the sun gives a surface facing it
+    (a white diffuse surface facing it shows sun_strength / pi; a Light's intensity is that radiance, so sun_strength / pi is the intensity of
+    the same sun as a Light; the sun disc's colour is the atmosphere's transmittance, so a low sun is dimmer and redder), sun_radius
     the disc's radius in radians (the real sun's is 0.0047, and a larger disc is found more reliably at few samples). sky_ratio is how much
     light the whole sky gives a horizontal surface, as a fraction of what the sun gives one facing it (about 0.15 to 0.3 for a clear sky).
     Below the horizon the map is the ground, a diffuse surface of ground_albedo lit by the sun and the sky. Returns linear radiance,
     (height, width, 3) float32, in the layout Environment(map=...) takes.
+
+    include_sun=False leaves the sun's disc out of the map, for use with sun_light(), which adds the sun as an explicit light instead. That is
+    the steadier choice for a moving camera: a highlight on a glossy surface is then computed from the light's direction and a shadow ray, where
+    a sun in the map is found only by a random ray that happens to land on the disc, so the highlight twinkles as the surface moves under a
+    pixel. The sky and ground light are the same either way.
     """
     if not 0.02 <= sun_elevation <= math.pi / 2:
         raise ValueError(f"sun_elevation must be between 0.02 and pi / 2, got {sun_elevation}")
@@ -229,15 +278,9 @@ def physical_sky(
 
     # The sun: the atmosphere's transmittance along the slant path (Kasten and Young's air mass; Rayleigh and aerosol optical depths for red,
     # green and blue), relative to the zenith's so that a sun at the zenith has exactly sun_strength.
-    def transmittance(elevation):
-        air_mass = 1.0 / (math.sin(elevation) + 0.50572 * (math.degrees(elevation) + 6.07995) ** -1.6364)
-        wavelengths = np.array([0.65, 0.55, 0.45])
-        tau = 0.008735 * wavelengths ** -4.08 + (0.04608 * T - 0.04586) * wavelengths ** -1.3
-        return np.exp(-air_mass * tau)
-
-    sun_colour = transmittance(sun_elevation) / transmittance(math.pi / 2)
+    sun_colour = _sun_transmittance(sun_elevation, T)
     disc = toward @ sun > math.cos(sun_radius)
-    if disc.any() and sun_strength > 0.0:
+    if include_sun and disc.any() and sun_strength > 0.0:
         texel_irradiance = float((solid_angle * (toward @ sun))[disc].sum())
         image[disc] = sun_strength * sun_colour / texel_irradiance
     return np.ascontiguousarray(image.astype(np.float32))

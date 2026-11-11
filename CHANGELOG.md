@@ -9,6 +9,16 @@ version (0.x.0) may change the API.
 ## [Unreleased]
 
 ### Added
+- **A steadier picture while the camera moves**, following the principles of the original raytracer (explicit lights evaluated analytically, deterministic
+  shading, accumulate when still and restart on change): (1) `sun_light()` and `physical_sky(include_sun=False)` make the sun an explicit light, so a highlight is
+  computed from the light's direction with a shadow ray and not found by a random ray landing on a small disc in the sky map (the cause of glints that twinkle as
+  a surface moves under a pixel); `environment_frame()` gives the frame the renderer uses for a map, so the light sits where the map's sun would (the map's x
+  and z are the world's -z and +x for an up of +y). (2) `PathTracing.moving_blend` (default 0.2): while the camera differs from the previous frame the denoiser
+  trusts new frames more, because reprojected history of a moving view carries lag and misalignment; a still camera uses `temporal_blend` and accumulates
+  deeply. (3) The examples no longer reset the frame counter when the camera or bodies move, which had thrown away all denoiser history on every moving frame;
+  they reset it only when the light changes. On an orbiting camera in the materials scene the error against a converged picture fell 62 % (0.0316 to 0.0120).
+  Documentation fix: a sky map's `sun_strength` is irradiance (a white diffuse surface facing it shows `sun_strength / pi`), while a `Light`'s intensity is that
+  radiance, so the same sun as a `Light` has intensity `sun_strength / pi`; the old docstrings said the units were the same.
 - **Glass** (`Material.transmission`, `Material.ior`): a smooth dielectric with exact Fresnel reflection, refraction by Snell's law, total internal
   reflection, medium tracking for closed solids and Beer-Lambert tinting by `diffuse_color`. Glass casts a light, tinted shadow (shadow rays pass through
   it) and does not spend the path's bounce budget. A clear ball in a uniform environment returns exactly the environment, a ball lens inverts what is

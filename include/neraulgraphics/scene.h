@@ -66,6 +66,13 @@ struct Sphere {
     Material material;
 };
 
+struct Square {
+    Vec3 center;
+    Vec3 normal;
+    float half_extent;
+    Material material;
+};
+
 // radius 0 is a point light (hard shadows); above 0 gives soft shadows.
 //
 // By default a light's intensity does not fall with distance, like the sun's. falloff makes it a lamp: the intensity is divided by

@@ -34,6 +34,18 @@ NG_FN bool project_to_camera(const Camera &c, const float3 &p, const int width, 
     return true;
 }
 
+// Whether two cameras are exactly the same view.
+GPU_FN bool same_camera(const Camera &a, const Camera &b) {
+    return a.position.x == b.position.x && a.position.y == b.position.y && a.position.z == b.position.z && a.right.x == b.right.x &&
+        a.right.y == b.right.y && a.right.z == b.right.z && a.up.x == b.up.x && a.up.y == b.up.y && a.up.z == b.up.z &&
+        a.forward.x == b.forward.x && a.forward.y == b.forward.y && a.forward.z == b.forward.z && a.fov_scale == b.fov_scale && a.aspect == b.aspect;
+}
+
+// The smallest weight a new frame gets: steady while the camera holds still, and at least moving while it moves (see PathTracing).
+GPU_FN float effective_blend(const Camera &cam, const Camera &prev, const float steady, const float moving) {
+    return same_camera(cam, prev) ? steady : fmaxf(steady, moving);
+}
+
 // Step 2: blend this frame's noisy light with the history from the last, and measure the variance over time.
 //   noisy     this frame's light with the colour divided out (rgb)
 //   gbuf      this frame's normals and depths; prev_gbuf the last frame's

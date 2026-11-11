@@ -117,7 +117,11 @@ struct PathTracing {
     // trail, since only the camera is tracked.
     bool denoise = true;
     int denoise_iterations = 5;    // passes of the spatial filter, 0 to 8; each reaches twice as far as the one before
-    float temporal_blend = 0.05f;  // the smallest weight a new frame gets once there is history: lower is smoother and slower to follow change
+    float temporal_blend = 0.05f;  // the smallest weight a new frame gets once there is history, while the camera is still: lower is smoother and slower to follow change
+    // The same, used instead while the camera is moving (when it differs from last frame's). Reprojected history of a moving view carries
+    // misalignment and lag that outweigh the noise it removes, so a moving camera does better trusting new frames more, and a still one
+    // accumulates deeply. The larger of the two is used while moving.
+    float moving_blend = 0.2f;
 };
 
 // True if this library was built with CUDA and an NVIDIA GPU is present, so Device::Auto

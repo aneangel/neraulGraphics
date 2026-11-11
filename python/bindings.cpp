@@ -424,11 +424,11 @@ NB_MODULE(_core, m) {
     nb::class_<PathTracing>(m, "PathTracing", "The settings of RenderMode.PathTraced.")
         .def("__init__",
             [](PathTracing *self, const int bounces, const float exposure, const float max_radiance, const bool tonemap,
-                const bool denoise, const int denoise_iterations, const float temporal_blend) {
-                new (self) PathTracing{bounces, exposure, max_radiance, tonemap, denoise, denoise_iterations, temporal_blend};
+                const bool denoise, const int denoise_iterations, const float temporal_blend, const float moving_blend) {
+                new (self) PathTracing{bounces, exposure, max_radiance, tonemap, denoise, denoise_iterations, temporal_blend, moving_blend};
             },
             "bounces"_a = 4, "exposure"_a = 1.0f, "max_radiance"_a = 20.0f, "tonemap"_a = true, "denoise"_a = true,
-            "denoise_iterations"_a = 5, "temporal_blend"_a = 0.05f,
+            "denoise_iterations"_a = 5, "temporal_blend"_a = 0.05f, "moving_blend"_a = 0.2f,
             "bounces: how many times light may bounce before a path ends, 0 to 32. exposure scales the light "
             "before it is shown. max_radiance scales a sample brighter than it down to it (0 for no limit), "
             "which keeps rare very bright paths from speckling the picture. tonemap compresses bright light "
@@ -436,14 +436,17 @@ NB_MODULE(_core, m) {
             "neighbouring pixels where the surface is the same, so a few samples per pixel look clean; it "
             "follows a moving camera, but a moving object leaves a short trail. denoise_iterations: passes "
             "of the spatial filter, 0 to 8. temporal_blend: the smallest weight a new frame gets once there "
-            "is history (lower is smoother and slower to follow change).")
+            "is history while the camera is still (lower is smoother and slower to follow change). moving_blend is the "
+            "same while the camera moves: reprojected history of a moving view carries misalignment and lag, so "
+            "trusting new frames more gives a cleaner moving picture, and a still camera still accumulates deeply.")
         .def_rw("bounces", &PathTracing::bounces)
         .def_rw("exposure", &PathTracing::exposure)
         .def_rw("max_radiance", &PathTracing::max_radiance)
         .def_rw("tonemap", &PathTracing::tonemap)
         .def_rw("denoise", &PathTracing::denoise)
         .def_rw("denoise_iterations", &PathTracing::denoise_iterations)
-        .def_rw("temporal_blend", &PathTracing::temporal_blend);
+        .def_rw("temporal_blend", &PathTracing::temporal_blend)
+        .def_rw("moving_blend", &PathTracing::moving_blend);
 
     nb::class_<Environment>(m, "Environment", "The sky that rays leaving the scene see, and what lights it from all sides.")
         .def("__init__",
