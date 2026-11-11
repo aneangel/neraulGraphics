@@ -98,6 +98,7 @@ using Matrix = nb::ndarray<const float, nb::shape<-1, 4>, nb::c_contig, nb::devi
 
 using Uvs = nb::ndarray<const float, nb::shape<-1, 2>, nb::c_contig, nb::device::cpu>;
 using Pixels = nb::ndarray<const uint8_t, nb::shape<-1, -1, -1>, nb::c_contig, nb::device::cpu>;
+using SkyMap = nb::ndarray<const float, nb::shape<-1, -1, 3>, nb::c_contig, nb::device::cpu>;
 
 Mesh make_mesh(const Vertices &vertices, const Triangles &triangles, const std::optional<Vertices> &normals,
     const std::optional<Uvs> &uvs) {
@@ -343,7 +344,8 @@ std::string repr(const Material &m) {
     return "Material(diffuse_color=" + fmt(m.diffuse_color) + ", diffuse_albedo=" +
         fmt(m.diffuse_albedo) + ", specular_albedo=" + fmt(m.specular_albedo) +
         ", reflectivity=" + fmt(m.reflectivity) + ", specular_exponent=" +
-        fmt(m.specular_exponent) + ")";
+        fmt(m.specular_exponent) + ", roughness=" + fmt(m.roughness) + ", metallic=" + fmt(m.metallic) +
+        ", emission=" + fmt(m.emission) + ")";
 }
 
 }  // namespace
@@ -369,20 +371,96 @@ NB_MODULE(_core, m) {
         .def("__init__",
             [](Material *self, const Vec3 &diffuse_color, const float diffuse_albedo,
                 const float specular_albedo, const float reflectivity,
-                const float specular_exponent) {
+                const float specular_exponent, const float roughness, const float metallic, const Vec3 &emission) {
                 new (self) Material{diffuse_color, diffuse_albedo, specular_albedo, reflectivity,
-                    specular_exponent};
+                    specular_exponent, roughness, metallic, emission};
             },
             "diffuse_color"_a = Vec3{0.8f, 0.8f, 0.8f}, "diffuse_albedo"_a = 0.9f,
             "specular_albedo"_a = 0.1f, "reflectivity"_a = 0.0f, "specular_exponent"_a = 50.0f,
+            "roughness"_a = -1.0f, "metallic"_a = -1.0f, "emission"_a = Vec3{0.0f, 0.0f, 0.0f},
             "reflectivity: 0 is matte, 1 is a perfect mirror. specular_exponent: higher gives "
-            "a smaller, sharper highlight.")
+            "a smaller, sharper highlight.\n\n"
+            "roughness, metallic and emission are the physically based parameters that path tracing uses "
+            "(the classic renderer ignores them). roughness: 0 is mirror-smooth, 1 fully rough. metallic: "
+            "0 is paint or plastic, 1 is a metal, which takes its colour from diffuse_color. emission is "
+            "light the surface gives off, as linear radiance. A negative roughness or metallic (the "
+            "default) is worked out from specular_exponent and reflectivity, so a material written for the "
+            "classic renderer looks sensible when path traced.")
         .def_rw("diffuse_color", &Material::diffuse_color)
         .def_rw("diffuse_albedo", &Material::diffuse_albedo)
         .def_rw("specular_albedo", &Material::specular_albedo)
         .def_rw("reflectivity", &Material::reflectivity)
         .def_rw("specular_exponent", &Material::specular_exponent)
+        .def_rw("roughness", &Material::roughness)
+        .def_rw("metallic", &Material::metallic)
+        .def_rw("emission", &Material::emission)
         .def("__repr__", &repr);
+
+    nb::enum_<RenderMode>(m, "RenderMode", "How a picture is made.")
+        .value("Classic", RenderMode::Classic,
+            "Direct light from each light with hard or soft shadows, and mirror reflections: fast.")
+        .value("PathTraced", RenderMode::PathTraced,
+            "Light bounced between surfaces, with soft shadows and sky light: realistic, and noisy until denoised.");
+
+    nb::class_<PathTracing>(m, "PathTracing", "The settings of RenderMode.PathTraced.")
+        .def("__init__",
+            [](PathTracing *self, const int bounces, const float exposure, const float max_radiance, const bool tonemap,
+                const bool denoise, const int denoise_iterations, const float temporal_blend) {
+                new (self) PathTracing{bounces, exposure, max_radiance, tonemap, denoise, denoise_iterations, temporal_blend};
+            },
+            "bounces"_a = 4, "exposure"_a = 1.0f, "max_radiance"_a = 20.0f, "tonemap"_a = true, "denoise"_a = true,
+            "denoise_iterations"_a = 5, "temporal_blend"_a = 0.05f,
+            "bounces: how many times light may bounce before a path ends, 0 to 32. exposure scales the light "
+            "before it is shown. max_radiance scales a sample brighter than it down to it (0 for no limit), "
+            "which keeps rare very bright paths from speckling the picture. tonemap compresses bright light "
+            "smoothly to what a screen can show (False clips it). denoise reuses the previous frame and "
+            "neighbouring pixels where the surface is the same, so a few samples per pixel look clean; it "
+            "follows a moving camera, but a moving object leaves a short trail. denoise_iterations: passes "
+            "of the spatial filter, 0 to 8. temporal_blend: the smallest weight a new frame gets once there "
+            "is history (lower is smoother and slower to follow change).")
+        .def_rw("bounces", &PathTracing::bounces)
+        .def_rw("exposure", &PathTracing::exposure)
+        .def_rw("max_radiance", &PathTracing::max_radiance)
+        .def_rw("tonemap", &PathTracing::tonemap)
+        .def_rw("denoise", &PathTracing::denoise)
+        .def_rw("denoise_iterations", &PathTracing::denoise_iterations)
+        .def_rw("temporal_blend", &PathTracing::temporal_blend);
+
+    nb::class_<Environment>(m, "Environment", "The sky that rays leaving the scene see, and what lights it from all sides.")
+        .def("__init__",
+            [](Environment *self, const Vec3 &up, const Vec3 &color_up, const Vec3 &color_down, const float intensity,
+                const nb::object &map_object, const float rotation) {
+                new (self) Environment();
+                self->up = up;
+                self->color_up = color_up;
+                self->color_down = color_down;
+                self->intensity = intensity;
+                self->rotation = rotation;
+                if (!map_object.is_none()) {
+                    // An 8-bit image would convert silently and be read as radiance 0 to 255: refuse it instead.
+                    if (nb::hasattr(map_object, "dtype") &&
+                        nb::cast<std::string>(map_object.attr("dtype").attr("kind")) != "f")
+                        throw nb::type_error("map must be a float array of linear radiance, not integers (convert and scale an 8-bit image first)");
+                    const SkyMap map = nb::cast<SkyMap>(map_object);
+                    self->map_height = static_cast<int>(map.shape(0));
+                    self->map_width = static_cast<int>(map.shape(1));
+                    self->map.assign(map.data(), map.data() + map.shape(0) * map.shape(1) * 3);
+                }
+            },
+            "up"_a = Vec3{0.0f, 1.0f, 0.0f}, "color_up"_a = Vec3{0.10f, 0.26f, 0.60f},
+            "color_down"_a = Vec3{0.35f, 0.52f, 0.70f}, "intensity"_a = 1.0f, "map"_a = nb::none(), "rotation"_a = 0.0f,
+            "up: the world's up axis (use (0, 0, 1) for a Z-up simulator). color_up and color_down: a gradient "
+            "sky, the colour straight up and straight down, halfway between at the horizon. intensity scales "
+            "the gradient's or the map's radiance. map: an equirectangular (height, width, 3) float32 array of "
+            "linear radiance, rows from straight up to straight down, which replaces the gradient; its bright "
+            "parts (a sun) light the scene and cast shadows, and are sampled efficiently. rotation turns the map "
+            "about the up axis, in radians.")
+        .def_rw("up", &Environment::up)
+        .def_rw("color_up", &Environment::color_up)
+        .def_rw("color_down", &Environment::color_down)
+        .def_rw("intensity", &Environment::intensity)
+        .def_rw("rotation", &Environment::rotation)
+        .def_prop_ro("has_map", [](const Environment &e) { return !e.map.empty(); });
 
     nb::class_<Sphere>(m, "Sphere")
         .def("__init__",
@@ -674,7 +752,9 @@ NB_MODULE(_core, m) {
         .def_prop_ro("last_kernel_ms", [](PyBatch &self) { return self.renderer.last_kernel_ms(); })
         .def_prop_rw("ambient", [](PyBatch &self) { return self.renderer.ambient(); },
             [](PyBatch &self, const float a) { self.renderer.set_ambient(a); },
-            "Light that reaches every surface regardless of the lights: see Renderer.ambient.");
+            "Light that reaches every surface regardless of the lights: see Renderer.ambient.")
+        .def("set_environment", [](PyBatch &self, const Environment &environment) { self.renderer.set_environment(environment); },
+            "environment"_a, "The sky that rays leaving the scene see: see Renderer.set_environment. Batches draw in the classic way.");
 
     nb::class_<PyRenderer>(m, "Renderer",
         "One scene and its frame buffers on the GPU. Safe to share between threads.")
@@ -713,6 +793,27 @@ NB_MODULE(_core, m) {
             "Light that reaches every surface regardless of the lights, as a fraction of its "
             "diffuse colour. 0 (the default) leaves surfaces facing away from every light black; "
             "0.1 to 0.3 keeps detail visible there. Render with frame=0 after changing it.")
+        .def("set_render_mode",
+            [](PyRenderer &self, const RenderMode mode, const std::optional<PathTracing> &settings) {
+                std::lock_guard<std::mutex> lock(self.mutex);
+                self.renderer.set_render_mode(mode, settings ? *settings : PathTracing{});
+            },
+            "mode"_a, "settings"_a = nb::none(),
+            "Choose how pictures are made: RenderMode.Classic (the default) or RenderMode.PathTraced, with "
+            "its PathTracing settings. Throws ValueError for a setting out of range, leaving the mode as it was. "
+            "Render with frame=0 afterwards.")
+        .def_prop_ro("render_mode", [](PyRenderer &self) {
+            std::lock_guard<std::mutex> lock(self.mutex);
+            return self.renderer.render_mode();
+        })
+        .def("set_environment",
+            [](PyRenderer &self, const Environment &environment) {
+                std::lock_guard<std::mutex> lock(self.mutex);
+                self.renderer.set_environment(environment);
+            },
+            "environment"_a,
+            "The sky that rays leaving the scene see. Both renderers draw it; path tracing also lights the "
+            "scene with it. Render with frame=0 afterwards.")
         .def("render_frame",
             [](PyRenderer &self, const Camera &camera, const int frame, const int spp, const bool rgb,
                 const bool depth, const bool normals, const bool object_ids, const bool zero_copy) {

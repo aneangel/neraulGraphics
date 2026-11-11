@@ -16,7 +16,16 @@ bool finite(const Vec3 &v) { return finite(v.x) && finite(v.y) && finite(v.z); }
 
 bool finite(const Material &m) {
     return finite(m.diffuse_color) && finite(m.diffuse_albedo) && finite(m.specular_albedo) &&
-        finite(m.reflectivity) && finite(m.specular_exponent);
+        finite(m.reflectivity) && finite(m.specular_exponent) && finite(m.roughness) && finite(m.metallic) &&
+        finite(m.emission);
+}
+
+void check_material(const Material &m, const std::string &name) {
+    require(finite(m), name + " has a NaN or infinite value");
+    // Negative roughness and metallic mean "work it out from the classic fields", so only the top is limited.
+    require(m.roughness <= 1.0f, name + " roughness must be at most 1, got " + std::to_string(m.roughness));
+    require(m.metallic <= 1.0f, name + " metallic must be at most 1, got " + std::to_string(m.metallic));
+    require(m.emission.x >= 0.0f && m.emission.y >= 0.0f && m.emission.z >= 0.0f, name + " emission must not be negative");
 }
 
 void check_frame_size(const int width, const int height) {
@@ -37,8 +46,8 @@ void check_scene(const std::vector<Sphere> &spheres, const std::vector<Light> &l
     for (size_t i = 0; i < spheres.size(); ++i) {
         const Sphere &sp = spheres[i];
         const std::string name = "sphere " + std::to_string(i);
-        require(finite(sp.center) && finite(sp.radius) && finite(sp.material),
-            name + " has a NaN or infinite value");
+        require(finite(sp.center) && finite(sp.radius), name + " has a NaN or infinite value");
+        check_material(sp.material, name);
         // A zero radius makes the hit normal 0/0.
         require(sp.radius > 0.0f, name + " radius must be positive, got " +
             std::to_string(sp.radius));
@@ -52,8 +61,8 @@ void check_scene(const std::vector<Sphere> &spheres, const std::vector<Light> &l
             std::to_string(l.radius));
     }
     require(finite(floor.y) && finite(floor.half_extent_x) && finite(floor.z_min) &&
-        finite(floor.z_max) && finite(floor.checker_scale) && finite(floor.material),
-        "floor has a NaN or infinite value");
+        finite(floor.z_max) && finite(floor.checker_scale), "floor has a NaN or infinite value");
+    check_material(floor.material, "floor");
 }
 
 void check_render_args(const Camera &c, const int frame, const int samples_per_frame) {

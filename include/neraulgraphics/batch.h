@@ -124,6 +124,9 @@ public:
 
     // Light that reaches every surface regardless of the lights: see Renderer::set_ambient.
     void set_ambient(float ambient);
+
+    // The sky that rays leaving the scene see: see Renderer::set_environment. (Batches draw in the classic way.)
+    void set_environment(const Environment &environment);
     float ambient() const;
 
 private:

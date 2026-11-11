@@ -9,6 +9,24 @@ version (0.x.0) may change the API.
 ## [Unreleased]
 
 ### Added
+- Beauty mode: path tracing. `Renderer.set_render_mode(RenderMode.PathTraced, PathTracing(...))` draws
+  light bouncing between surfaces with soft shadows, sky lighting and physically based materials
+  (GGX specular with Lambert diffuse, sampled by visible normals), by unidirectional path tracing with direct
+  light sampling and Russian roulette. A sample brighter than `max_radiance` is scaled down against fireflies.
+  Both backends, with the same results (the CPU and the GPU agree to noise). Classic materials need no change:
+  `Material` gains `roughness`, `metallic` and `emission`, and when roughness or metallic is left unset they
+  are worked out from the specular exponent and reflectivity.
+- `Environment` and `Renderer.set_environment`: a gradient or an equirectangular HDR map as the sky, which
+  rays leaving the scene see in either renderer and path tracing also uses as light. A map is importance
+  sampled, combined with material sampling by multiple importance sampling, so a small bright sun lights and
+  shadows cleanly. `up` and `rotation` orient it. `load_hdr` reads Radiance `.hdr` files and `procedural_sky`
+  makes a sky with a sun of a given strength.
+- A denoiser for path-traced pictures: reuse of the previous frame along the camera's motion, with history
+  rejected where the surface changed, then an edge-aware spatial filter steered by variance. One path per pixel
+  looks clean, and the picture keeps improving while the camera holds still.
+- `sim.beauty(sky=None, **settings)` and `sim.classic()` on the Newton and MuJoCo adapters (the sky follows
+  the simulator's up axis). The glTF loader passes roughness, metallic and emission through.
+- Viewer: `--beauty` and the `B` key.
 - Batched worlds. `BatchRenderer` draws many worlds at once, each seen by its own camera(s) and
   holding the same instances placed differently, and returns `(views, H, W, ...)` batches of RGB,
   depth, normals and object IDs. Poses (`set_instance_transforms`, or simulator body poses through

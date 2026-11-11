@@ -402,6 +402,8 @@ def _gltf_material(spec: dict | None) -> tuple[Material, dict | None]:
     color, metallic, rough = pbr.get("baseColorFactor", (1.0, 1.0, 1.0, 1.0)), pbr.get("metallicFactor", 1.0), \
         pbr.get("roughnessFactor", 1.0)
     texture = pbr.get("baseColorTexture")
+    emissive = spec.get("emissiveFactor", (0.0, 0.0, 0.0))
+    strength = float(spec.get("extensions", {}).get("KHR_materials_emissive_strength", {}).get("emissiveStrength", 1.0))
     legacy = spec.get("extensions", {}).get("KHR_materials_pbrSpecularGlossiness")
     if legacy is not None:  # the older workflow still found in many files
         color, texture = legacy.get("diffuseFactor", (1.0, 1.0, 1.0, 1.0)), legacy.get("diffuseTexture")
@@ -412,7 +414,10 @@ def _gltf_material(spec: dict | None) -> tuple[Material, dict | None]:
     material = Material(diffuse_color=tuple(float(c) for c in color[:3]),
                         diffuse_albedo=float(1.0 - 0.6 * metallic), specular_albedo=float(0.15 + 0.25 * (1.0 - rough)),
                         reflectivity=float(metallic * (1.0 - rough) * 0.6),
-                        specular_exponent=float(np.clip(2.0 / rough**2, 4.0, 1500.0)))
+                        specular_exponent=float(np.clip(2.0 / rough**2, 4.0, 1500.0)),
+                        # What path tracing reads: glTF's own parameters, which it was designed around.
+                        roughness=rough, metallic=float(np.clip(metallic, 0.0, 1.0)),
+                        emission=tuple(float(c) * strength for c in emissive[:3]))
     return material, texture
 
 

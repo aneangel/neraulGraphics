@@ -1,22 +1,14 @@
 #include "mesh_build.h"
+#include "validate.h"
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
 #include <string>
 
-// Compiled without -ffast-math (only the CUDA sources get it), so std::isfinite
-// here still sees NaN. The same reason the other input checks live in a library file.
+// The checks themselves (require, finite) are validate.h's: built without -ffast-math, so they still see NaN.
 
 namespace neraulgraphics::detail {
 namespace {
-
-void require(const bool ok, const std::string &message) {
-    if (!ok) throw std::invalid_argument(message);
-}
-
-bool finite(const float v) { return std::isfinite(v); }
-
-bool finite(const Vec3 &v) { return finite(v.x) && finite(v.y) && finite(v.z); }
 
 // Triangle count that keeps every index the kernel forms (3 * tri + 2) inside an int.
 constexpr size_t MAX_TRIANGLES = 100000000;
@@ -86,10 +78,7 @@ void check_meshes(const std::vector<Mesh> &meshes, const std::vector<Instance> &
             std::to_string(textures.size()) + " textures");
         require(inst.texture < 0 || !meshes[inst.mesh].uvs.empty(),
             name + " has a texture, but its mesh " + std::to_string(inst.mesh) + " has no uvs");
-        const Material &mat = inst.material;
-        require(finite(mat.diffuse_color) && finite(mat.diffuse_albedo) && finite(mat.specular_albedo) &&
-            finite(mat.reflectivity) && finite(mat.specular_exponent),
-            name + " material has a NaN or infinite value");
+        check_material(inst.material, name + " material");
     }
 }
 

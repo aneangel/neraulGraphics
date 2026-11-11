@@ -148,7 +148,7 @@ namespace {
     }
 }
 
-int run(const int instance_count, View view, const std::string &snapshot) {
+int run(const int instance_count, View view, const std::string &snapshot, bool beauty) {
     constexpr int width = 1920;
     constexpr int height = 1080;
     constexpr float fov = M_PI / 2;
@@ -200,6 +200,13 @@ int run(const int instance_count, View view, const std::string &snapshot) {
     // Built before the window, so a bad scene is reported without one flashing up.
     // Frees its device memory when it goes out of scope.
     Renderer gpu_renderer(width, height, spheres, lights, floor, meshes, instances);
+    // Beauty mode is path tracing: bounced light, soft shadows from the sky, physically based materials, denoised so a
+    // few samples per pixel look clean. The classic picture is the fast one, for flying about.
+    auto apply_mode = [&] {
+        if (beauty) gpu_renderer.set_render_mode(RenderMode::PathTraced, PathTracing{});
+        else gpu_renderer.set_render_mode(RenderMode::Classic);
+    };
+    apply_mode();
     float update_ms = 0.0f;
     float time = 0.0f;
 
@@ -208,13 +215,16 @@ int run(const int instance_count, View view, const std::string &snapshot) {
         const Camera camera = make_camera(Vec3{0, 0, 0}, forward_from_angles(0.0f, 0.0f), world_up, fov, width, height);
         std::vector<uint32_t> shown;
         if (view == View::Rgb) {
-            const uint32_t *p = gpu_renderer.render(camera, 0, 4);
+            // A path-traced picture refines itself over frames; the classic one just takes 4 rays a pixel.
+            const uint32_t *p = nullptr;
+            if (beauty) for (int f = 0; f < 64; ++f) p = gpu_renderer.render(camera, f, 1);
+            else p = gpu_renderer.render(camera, 0, 4);
             shown.assign(p, p + static_cast<size_t>(width) * height);
         } else {
             colorize(gpu_renderer.render_frame_host(camera, 0, 1, outputs_for(view)), view, shown);
         }
         save_ppm(shown.data(), width, height, snapshot);
-        std::cout << "wrote " << snapshot << " (" << view_name(view) << ", " << width << "x" << height << ")\n";
+        std::cout << "wrote " << snapshot << " (" << view_name(view) << (beauty && view == View::Rgb ? ", path traced" : "") << ", " << width << "x" << height << ")\n";
         return 0;
     }
 
@@ -239,7 +249,9 @@ int run(const int instance_count, View view, const std::string &snapshot) {
     uint64_t prev = SDL_GetPerformanceCounter();
 
     std::cout << "drag left mouse to look, WASD to move, Q/E down/up, shift to sprint, P to save, Esc to quit\n"
-              << "1 rgb   2 depth   3 normals   4 object ids   (what a depth camera, a surface-normal sensor and a segmenter see)\n";
+              << "1 rgb   2 depth   3 normals   4 object ids   (what a depth camera, a surface-normal sensor and a segmenter see)\n"
+              << "B beauty mode: path-traced light, soft sky shadows and bounces, denoised (hold still and it keeps improving)\n";
+    bool mode_changed = false;
     std::vector<uint32_t> shown;  // a sensor image as it is displayed
 
     while (running) {
@@ -277,6 +289,11 @@ int run(const int instance_count, View view, const std::string &snapshot) {
                     if (event.key.keysym.scancode == SDL_SCANCODE_2) view = View::Depth;
                     if (event.key.keysym.scancode == SDL_SCANCODE_3) view = View::Normals;
                     if (event.key.keysym.scancode == SDL_SCANCODE_4) view = View::Ids;
+                    if (event.key.keysym.scancode == SDL_SCANCODE_B) {
+                        beauty = !beauty;
+                        apply_mode();
+                        mode_changed = true;
+                    }
                     if (event.key.keysym.scancode == SDL_SCANCODE_P && pixels) {
                         save_ppm(pixels, width, height, "./screenshot.ppm");
                         std::cout << "wrote ./screenshot.ppm (" << frame + 1 << " samples/pixel)\n";
@@ -311,7 +328,10 @@ int run(const int instance_count, View view, const std::string &snapshot) {
             update_ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
             moved = true;
         }
-        frame = moved ? 0 : frame + 1;
+        // Classic pictures average while the camera holds still, so any change restarts them. A denoised path-traced
+        // picture instead carries its history along with the camera, so its frame number only restarts with a new mode.
+        frame = mode_changed ? 0 : (moved && !beauty) ? 0 : frame + 1;
+        mode_changed = false;
 
         const Camera camera = make_camera(position, position + forward_from_angles(yaw, pitch),
             world_up, fov, width, height);
@@ -330,8 +350,8 @@ int run(const int instance_count, View view, const std::string &snapshot) {
         SDL_RenderPresent(renderer);
 
         char title[200];
-        snprintf(title, sizeof(title), "raytracer [%s]  %dx%d  %.1f fps  kernel %.2f ms  %d spp  pos %.1f %.1f %.1f",
-            view_name(view), width, height, 1.f / dt, gpu_renderer.last_kernel_ms(),
+        snprintf(title, sizeof(title), "raytracer [%s%s]  %dx%d  %.1f fps  kernel %.2f ms  %d spp  pos %.1f %.1f %.1f",
+            view_name(view), beauty && view == View::Rgb ? ", beauty" : "", width, height, 1.f / dt, gpu_renderer.last_kernel_ms(),
             view == View::Rgb ? (frame + 1) * samples_per_frame : 1, position.x, position.y, position.z);
         if (!bodies.empty()) {
             const size_t used = strlen(title);
@@ -352,6 +372,7 @@ int main(const int argc, char **argv) {
     int instance_count = 0;
     View view = View::Rgb;
     std::string snapshot;
+    bool beauty = false;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--instances" && i + 1 < argc) {
@@ -368,12 +389,16 @@ int main(const int argc, char **argv) {
             }
         } else if (arg == "--snapshot" && i + 1 < argc) {
             snapshot = argv[++i];
+        } else if (arg == "--beauty") {
+            beauty = true;
         } else {
-            std::cerr << "usage: " << argv[0] << " [--instances N] [--mode rgb|depth|normals|ids] [--snapshot FILE.ppm]\n"
+            std::cerr << "usage: " << argv[0] << " [--instances N] [--mode rgb|depth|normals|ids] [--snapshot FILE.ppm] [--beauty]\n"
                       << "  --instances N        add N spinning boxes and spheres, to see how the BVH copes\n"
                       << "  --mode M             start showing the picture (rgb) or a sensor image: depth, normals or ids\n"
                       << "                       (keys 1 to 4 switch while running)\n"
-                      << "  --snapshot FILE.ppm  save one frame and exit, without opening a window\n";
+                      << "  --snapshot FILE.ppm  save one frame and exit, without opening a window\n"
+                      << "  --beauty             start in beauty mode: path-traced light, soft sky shadows and bounces, denoised\n"
+                      << "                       (key B switches while running)\n";
             return arg == "--help" ? 0 : 1;
         }
     }
@@ -383,7 +408,7 @@ int main(const int argc, char **argv) {
     }
 
     try {
-        return run(instance_count, view, snapshot);
+        return run(instance_count, view, snapshot, beauty);
     } catch (const std::exception &e) {
         std::cerr << "error: " << e.what() << "\n";
         return 1;

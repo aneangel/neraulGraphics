@@ -21,6 +21,7 @@ sharpens the longer the camera holds still.
 - **Load models.** `ng.load("model.glb")` reads glTF, GLB and OBJ with materials, colour textures, smooth normals and node hierarchies.
 - **Newton and MuJoCo adapters.** `NewtonRenderer(model).render(state)` and `MuJoCoRenderer(model).render(data)`: shapes become instances once, and each frame only poses are updated.
 - **Reflections, soft shadows, anti-aliasing**, plus progressive refinement while the camera is still.
+- **Beauty mode.** Path tracing with physically based materials (roughness, metallic, emission), light that bounces between surfaces, soft shadows, and sky or HDRI lighting with importance sampling, denoised so a few samples per pixel look clean. One call to switch on, and the classic renderer is still there for speed.
 - **Interactive viewer** with free-fly camera: `make raytracer`.
 - **Clear errors.** Bad scenes raise `ValueError` (Python) or `std::invalid_argument` (C++) saying what is wrong, instead of crashing.
 
@@ -88,6 +89,31 @@ images = view.render(state, depth=True, zero_copy=True)          # state.body_q 
 
 See [examples/batch_render.py](https://github.com/aneangel/neraulGraphics/blob/main/examples/batch_render.py)
 for the whole data path with PyTorch.
+
+## Beauty mode: path-traced pictures
+
+The classic renderer is fast and what a policy usually wants. When a picture is for a person (a paper,
+a demo, a dataset that should look real) switch to path tracing:
+
+```python
+renderer.set_render_mode(ng.RenderMode.PathTraced, ng.PathTracing(bounces=4))
+renderer.set_environment(ng.Environment(map=ng.procedural_sky(sun_elevation=0.9, sun_strength=3.0)))  # or ng.load_hdr("sky.hdr")
+for frame in range(32):          # hold the camera still and the picture keeps refining
+    image = renderer.render(camera, frame)
+```
+
+- **Materials.** `Material(roughness=, metallic=, emission=)` are the physically based parameters. A material
+  written for the classic renderer needs none of them: roughness and metallic are worked out from its specular
+  exponent and reflectivity.
+- **Light.** Lights are soft when their radius is above 0. The sky lights the scene from all sides: a gradient, or
+  an equirectangular HDR map whose sun is sampled directly, so it casts clean shadows at a few samples per pixel.
+  Set `Environment(up=(0, 0, 1))` for a Z-up simulator; the adapters do it for you with `sim.beauty()`.
+- **Denoising.** On by default: the previous frame is reprojected along the camera's motion and a spatial filter
+  steered by normals, depth and brightness smooths what is left. It follows a moving camera; a moving object leaves a
+  short trail. `PathTracing(denoise=False)` gives the plain average, which converges to the same picture.
+- **Viewer.** `./raytracer --beauty`, or press `B` while it runs.
+
+Batched worlds draw in the classic way.
 
 ## Sensors: depth, segmentation, LiDAR
 

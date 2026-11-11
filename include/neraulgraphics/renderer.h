@@ -100,6 +100,26 @@ struct HostRayHits {
     std::vector<int32_t> object_id;
 };
 
+// How the picture is made.
+enum class RenderMode {
+    Classic,     // direct light from each light with hard or soft shadows, mirror reflections: fast, and what a Renderer always did
+    PathTraced,  // light bounced between surfaces, soft shadows, sky light, physically based materials: realistic, and noisy until denoised
+};
+
+// The settings of RenderMode::PathTraced.
+struct PathTracing {
+    int bounces = 4;               // how many times light may bounce before a path ends, 0 to 32; more is more realistic and slower
+    float exposure = 1.0f;         // scales the light before it is shown
+    float max_radiance = 20.0f;    // a sample brighter than this is scaled down to it (0 for no limit): keeps rare very bright paths from speckling the picture
+    bool tonemap = true;           // compress bright light smoothly to what a screen can show; false clips it instead
+    // Denoising makes a picture from only a few samples per pixel look clean, by reusing the previous frame and
+    // neighbouring pixels where the surface is the same. It follows a moving camera, but a moving object leaves a short
+    // trail, since only the camera is tracked.
+    bool denoise = true;
+    int denoise_iterations = 5;    // passes of the spatial filter, 0 to 8; each reaches twice as far as the one before
+    float temporal_blend = 0.05f;  // the smallest weight a new frame gets once there is history: lower is smoother and slower to follow change
+};
+
 // True if this library was built with CUDA and an NVIDIA GPU is present, so Device::Auto
 // would use it. The environment variable NERAULGRAPHICS_DEVICE set to cpu or cuda overrides
 // what Auto chooses (for debugging, or to leave the GPU to something else).
@@ -182,6 +202,24 @@ public:
 
     // Where this renderer keeps its images: Device for CUDA, Host for the CPU.
     Memory memory() const;
+
+    // Chooses how render() and render_frame() draw the picture. RenderMode::PathTraced follows light as it
+    // bounces, with physically based materials (Material's roughness, metallic and emission; the classic
+    // fields are translated), the lights' soft shadows and the environment as the sky's light, and denoises the
+    // result; see PathTracing. The meaning of render()'s frame changes with it: 0 starts again, and every
+    // later frame adds to what the previous ones saw, following the camera if it moved, so pass an increasing
+    // frame whether or not the camera moves (with denoising off, the camera must hold still). Ambient light is not
+    // used in this mode, since the sky does that work. The other images (depth, normals, IDs) are unchanged.
+    //
+    // Throws std::invalid_argument, changing nothing, for a setting out of range or not finite.
+    void set_render_mode(RenderMode mode, const PathTracing &settings = {});
+    RenderMode render_mode() const;
+
+    // The sky: what rays that leave the scene see, and, in a path-traced picture, the light it casts. A plain
+    // gradient by default; see Environment. Takes effect on the next render.
+    //
+    // Throws std::invalid_argument, changing nothing, for a map of the wrong size or with a negative or non-finite value.
+    void set_environment(const Environment &environment);
 
     // Light that reaches every surface regardless of the lights, as a fraction of its diffuse
     // colour: a stand-in for light bounced from the rest of the scene, which this renderer does

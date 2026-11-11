@@ -18,7 +18,10 @@
 #include <neraulgraphics/renderer.h>
 #include "backend.h"
 #include "bvh.h"
+#include "denoise_core.h"
+#include "environment.h"
 #include "instances.h"
+#include "path_core.h"
 #include "render_core.h"
 
 namespace neraulgraphics::host {
@@ -119,6 +122,8 @@ public:
         const size_t pixels = static_cast<size_t>(width_) * height_;
         accum_.assign(pixels, host::float4{0.0f, 0.0f, 0.0f, 0.0f});
         pixels_.assign(pixels, 0u);
+        set_environment(Environment{});
+        set_render_mode(RenderMode::Classic, PathTracing{});
 
         // Keep the textures' bytes, and a table of handles the shading code indexes.
         for (const Texture &t : scene.textures) texture_bytes_.push_back(t.rgba);
@@ -273,6 +278,34 @@ public:
 
     void set_ambient(const float ambient) override { params_.ambient = ambient; }
     float ambient() const override { return params_.ambient; }
+
+    void set_render_mode(const RenderMode mode, const PathTracing &settings) override {
+        mode_ = mode;
+        pt_ = settings;
+        params_.path = host::PathParams{settings.bounces, settings.max_radiance, settings.exposure, settings.tonemap ? 1 : 0};
+        have_prev_ = false;  // whatever was accumulated was made differently
+    }
+    RenderMode render_mode() const override { return mode_; }
+
+    void set_environment(const Environment &environment) override {
+        env_tables_ = build_environment_tables(environment);
+        host::EnvParams &e = params_.env;
+        e.right = host::make_float3(env_tables_.right[0], env_tables_.right[1], env_tables_.right[2]);
+        e.up = host::make_float3(env_tables_.up[0], env_tables_.up[1], env_tables_.up[2]);
+        e.forward = host::make_float3(env_tables_.forward[0], env_tables_.forward[1], env_tables_.forward[2]);
+        e.color_up = host::to_device(environment.color_up);
+        e.color_down = host::to_device(environment.color_down);
+        e.intensity = environment.intensity;
+        e.rotation = environment.rotation;
+        env_map_ = to_float4(env_tables_.rgba);
+        e.map = env_map_.empty() ? nullptr : env_map_.data();
+        e.map_width = environment.map_width;
+        e.map_height = environment.map_height;
+        e.marginal = env_tables_.marginal.empty() ? nullptr : env_tables_.marginal.data();
+        e.conditional = env_tables_.conditional.empty() ? nullptr : env_tables_.conditional.data();
+        e.density = env_tables_.density.empty() ? nullptr : env_tables_.density.data();
+        have_prev_ = false;
+    }
     float last_kernel_ms() const override { return ms_; }
     Device device() const override { return Device::Cpu; }
 
@@ -284,6 +317,10 @@ private:
 
     // The picture, into pixels_ (0xAARRGGBB).
     void draw(const Camera &camera, const int frame, const int samples_per_frame) {
+        if (mode_ == RenderMode::PathTraced) {
+            draw_path_traced(camera, frame, samples_per_frame);
+            return;
+        }
         const host::Camera cam = host::to_device(camera);
         parallel_chunks(height_, 4, [&](const int y0, const int y1) {
             for (int y = y0; y < y1; ++y)
@@ -291,6 +328,93 @@ private:
                     host::render_pixel(params_, 0, accum_.data(), pixels_.data(), x, y, width_, height_, cam, frame,
                         samples_per_frame);
         });
+    }
+
+    // Path tracing, with or without the denoiser; see denoise_core.h for the steps.
+    void draw_path_traced(const Camera &camera, const int frame, const int spp) {
+        const host::Camera cam = host::to_device(camera);
+        const int w = width_, h = height_;
+        if (!pt_.denoise) {
+            // A running average of the light, which converges as long as the camera holds still.
+            parallel_chunks(h, 4, [&](const int y0, const int y1) {
+                for (int y = y0; y < y1; ++y)
+                    for (int x = 0; x < w; ++x) {
+                        host::FirstHit first;
+                        host::float3 irradiance;
+                        const host::float3 radiance = host::path_pixel(params_, 0, x, y, w, h, cam, frame, spp, first, irradiance);
+                        const int idx = y * w + x;
+                        const host::float4 acc = frame == 0 ? host::to_float4(radiance, 1.0f) : accum_[idx] + host::to_float4(radiance, 1.0f);
+                        accum_[idx] = acc;
+                        pixels_[idx] = host::resolve_pixel(params_.path, host::xyz(acc) * (1.0f / acc.w), pt_.tonemap);
+                    }
+            });
+            return;
+        }
+
+        const size_t n = static_cast<size_t>(w) * h;
+        if (noisy_.size() != n) {
+            const host::float4 zero{0.0f, 0.0f, 0.0f, 0.0f};
+            noisy_.assign(n, zero);
+            albedo_.assign(n, zero);
+            for (int k = 0; k < 2; ++k) {
+                gbuf_[k].assign(n, zero);
+                hist_[k].assign(n, zero);
+                mom_[k].assign(n, zero);
+                filt_[k].assign(n, zero);
+            }
+            have_prev_ = false;
+        }
+        const int cur = flip_, old = 1 - flip_;
+
+        // 1. Trace.
+        parallel_chunks(h, 4, [&](const int y0, const int y1) {
+            for (int y = y0; y < y1; ++y)
+                for (int x = 0; x < w; ++x) {
+                    host::FirstHit first;
+                    host::float3 irradiance;
+                    host::path_pixel(params_, 0, x, y, w, h, cam, frame, spp, first, irradiance);
+                    const int idx = y * w + x;
+                    noisy_[idx] = host::to_float4(irradiance, 1.0f);
+                    gbuf_[cur][idx] = host::make_float4(first.normal.x, first.normal.y, first.normal.z, first.depth);
+                    albedo_[idx] = host::to_float4(first.albedo, 1.0f);
+                }
+        });
+
+        // 2. Blend with last frame.
+        const bool valid_history = frame > 0 && have_prev_;
+        parallel_chunks(h, 4, [&](const int y0, const int y1) {
+            for (int y = y0; y < y1; ++y)
+                for (int x = 0; x < w; ++x)
+                    host::temporal_accumulate_pixel(x, y, w, h, cam, prev_cam_, valid_history, noisy_.data(), gbuf_[cur].data(),
+                        gbuf_[old].data(), hist_[old].data(), mom_[old].data(), hist_[cur].data(), mom_[cur].data(), filt_[0].data(),
+                        pt_.temporal_blend);
+        });
+
+        // 3. Filter in space, each pass reaching twice as far as the one before.
+        const host::float4 *result = filt_[0].data();
+        for (int i = 0, from = 0; i < pt_.denoise_iterations; ++i, from ^= 1) {
+            host::float4 *to = filt_[from ^ 1].data();
+            const host::float4 *source = filt_[from].data();
+            parallel_chunks(h, 4, [&](const int y0, const int y1) {
+                for (int y = y0; y < y1; ++y)
+                    for (int x = 0; x < w; ++x) host::atrous_pixel(x, y, w, h, source, to, gbuf_[cur].data(), 1 << i);
+            });
+            result = to;
+        }
+
+        // 4. Put the colour back and show it.
+        parallel_chunks(h, 4, [&](const int y0, const int y1) {
+            for (int y = y0; y < y1; ++y)
+                for (int x = 0; x < w; ++x) {
+                    const int idx = y * w + x;
+                    const host::float3 light = host::xyz(result[idx]) * host::xyz(albedo_[idx]);
+                    pixels_[idx] = host::resolve_pixel(params_.path, light, pt_.tonemap);
+                }
+        });
+
+        prev_cam_ = cam;
+        have_prev_ = true;
+        flip_ ^= 1;
     }
 
     static std::vector<host::float4> to_float4(const std::vector<float> &flat) {
@@ -324,6 +448,16 @@ private:
     std::vector<host::float4> accum_;
     std::vector<uint32_t> pixels_;
     float ms_ = 0.0f;
+
+    // Path tracing: the mode, the sky's tables, and the buffers the denoiser keeps between frames.
+    RenderMode mode_ = RenderMode::Classic;
+    PathTracing pt_;
+    EnvironmentTables env_tables_;
+    std::vector<host::float4> env_map_;
+    std::vector<host::float4> noisy_, albedo_, gbuf_[2], hist_[2], mom_[2], filt_[2];
+    host::Camera prev_cam_{};
+    bool have_prev_ = false;
+    int flip_ = 0;
 
     // The images render_frame() hands out, and the results of the last ray query. Allocated when first asked for.
     std::vector<uint8_t> rgb_;

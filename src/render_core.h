@@ -20,11 +20,34 @@ constexpr float SURFACE_EPS = 1e-3f;
 // kernel by value, and kernel parameters live in constant memory, so every thread in a warp
 // reading the same sphere still gets it in one broadcast. Each Renderer launches with its own
 // copy, which is what lets several coexist.
+// The sky, ready to look up: a gradient, or a map with the tables that choose directions on it in proportion to its brightness.
+struct EnvParams {
+    float3 right, up, forward;      // a frame for the up axis; a direction is looked up as (right, up, forward)
+    float3 color_up, color_down;
+    float intensity;
+    float rotation;                 // radians about up
+    const float4 *map;              // null for the gradient
+    int map_width, map_height;
+    const float *marginal;          // map_height + 1
+    const float *conditional;       // map_height * (map_width + 1)
+    const float *density;           // map_width * map_height
+};
+
+// What path tracing is asked to do.
+struct PathParams {
+    int bounces;           // light bounces before a path ends
+    float max_radiance;    // a sample brighter than this is scaled down to it, which keeps rare very bright paths (fireflies) from speckling the image
+    float exposure;
+    int tonemap;           // nonzero: compress bright light to what a screen can show, rather than clipping it
+};
+
 struct SceneParams {
     Sphere spheres[MAX_SPHERES];
     Light lights[MAX_LIGHTS];
     Plane floor;
     MeshScene mesh;
+    EnvParams env;
+    PathParams path;
     float ambient;
     int sphere_count;
     int light_count;
@@ -133,11 +156,37 @@ NG_FN bool scene_occluded(const SceneParams &s, const int world, const float3 &o
     return s.mesh.instance_count > 0 && mesh_occluded(s.mesh, world, origin, dir, max_dist);
 }
 
-// Vertical gradient background.
-NG_FN float3 sky(const float3 &dir) {
-    const float t = saturate(dir.y * 0.5f + 0.5f);
-    return lerp(make_float3(0.35f, 0.52f, 0.70f), make_float3(0.10f, 0.26f, 0.60f), t);
+// The map's colour in a direction: equirectangular, bilinear, wrapping round the up axis.
+NG_FN float3 environment_map_lookup(const EnvParams &e, const float3 &dir) {
+    const float x = dot(dir, e.right), y = dot(dir, e.up), z = dot(dir, e.forward);
+    const float two_pi = 6.28318530718f;
+    float u = atan2f(z, x) / two_pi + e.rotation / two_pi;
+    u -= floorf(u);
+    const float v = acosf(fminf(fmaxf(y, -1.0f), 1.0f)) * 0.31830988618f;  // angle from up, over pi
+    const float fx = u * static_cast<float>(e.map_width) - 0.5f, fy = v * static_cast<float>(e.map_height) - 0.5f;
+    const float x0f = floorf(fx), y0f = floorf(fy);
+    const float tx = fx - x0f, ty = fy - y0f;
+    const int w = e.map_width, h = e.map_height;
+    int x0 = static_cast<int>(x0f), x1 = x0 + 1, y0 = static_cast<int>(y0f), y1 = y0 + 1;
+    x0 = (x0 % w + w) % w;  // wraps round the up axis
+    x1 = (x1 % w + w) % w;
+    y0 = y0 < 0 ? 0 : (y0 > h - 1 ? h - 1 : y0);  // and stops at the poles
+    y1 = y1 < 0 ? 0 : (y1 > h - 1 ? h - 1 : y1);
+    const float4 a = e.map[y0 * w + x0], b = e.map[y0 * w + x1], c = e.map[y1 * w + x0], d = e.map[y1 * w + x1];
+    return make_float3((a.x + (b.x - a.x) * tx) * (1 - ty) + (c.x + (d.x - c.x) * tx) * ty,
+        (a.y + (b.y - a.y) * tx) * (1 - ty) + (c.y + (d.y - c.y) * tx) * ty,
+        (a.z + (b.z - a.z) * tx) * (1 - ty) + (c.z + (d.z - c.z) * tx) * ty);
 }
+
+// What the sky looks like in a direction: its radiance. The classic gradient by default, brighter or darker along the up axis.
+NG_FN float3 environment_radiance(const EnvParams &e, const float3 &dir) {
+    if (e.map != nullptr) return environment_map_lookup(e, dir) * e.intensity;
+    const float t = saturate(dot(dir, e.up) * 0.5f + 0.5f);
+    return lerp(e.color_down, e.color_up, t) * e.intensity;
+}
+
+// Vertical gradient background.
+NG_FN float3 sky(const SceneParams &s, const float3 &dir) { return environment_radiance(s.env, dir); }
 
 // Nudges a new ray off the surface it started on to avoid self-intersection.
 NG_FN float3 offset_origin(const float3 &point, const float3 &normal, const float3 &dir) {
@@ -153,7 +202,7 @@ NG_FN float3 trace(const SceneParams &s, const int world, float3 origin, float3 
     for (int depth = 0;; ++depth) {
         Hit hit;
         if (depth > MAX_DEPTH || !scene_intersect(s, world, origin, dir, hit)) {
-            radiance += sky(dir) * throughput;
+            radiance += sky(s, dir) * throughput;
             break;
         }
 

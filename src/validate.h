@@ -18,6 +18,9 @@ bool finite(float v);
 bool finite(const Vec3 &v);
 bool finite(const Material &m);
 
+// Throws std::invalid_argument saying what is wrong with a material, named `name` in the message.
+void check_material(const Material &m, const std::string &name);
+
 void check_frame_size(int width, int height);
 void check_scene(const std::vector<Sphere> &spheres, const std::vector<Light> &lights, const Plane &floor);
 void check_render_args(const Camera &camera, int frame, int samples_per_frame);

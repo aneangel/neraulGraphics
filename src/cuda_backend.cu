@@ -5,7 +5,10 @@
 #include <cstdint>
 #include <string>
 #include "backend.h"
+#include "denoise_core.h"
+#include "environment.h"
 #include "instances.h"
+#include "path_core.h"
 #include "render_core.h"
 
 // Throws neraulgraphics::CudaError naming the failed call and where it was made.
@@ -102,6 +105,62 @@ __global__ void ray_batch_kernel(const __grid_constant__ SceneParams s, const fl
     cast_ray(s, i / rays_per_world, origins, directions, max_distance, i, distance, normal, object_id);
 }
 
+// Path tracing without the denoiser: a running average of the light, tone mapped.
+__global__ void path_simple_kernel(const __grid_constant__ SceneParams s, float4 *accum, uint32_t *out, const int width,
+    const int height, const Camera cam, const int frame, const int spp) {
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= width || y >= height) return;
+    FirstHit first;
+    float3 irradiance;
+    const float3 radiance = path_pixel(s, 0, x, y, width, height, cam, frame, spp, first, irradiance);
+    const int idx = y * width + x;
+    const float4 acc = frame == 0 ? to_float4(radiance, 1.0f) : accum[idx] + to_float4(radiance, 1.0f);
+    accum[idx] = acc;
+    out[idx] = resolve_pixel(s.path, xyz(acc) * (1.0f / acc.w), s.path.tonemap != 0);
+}
+
+// Denoised path tracing, pass 1: the noisy light with its colour divided out, and what the filter needs to know about the surface.
+__global__ void path_trace_kernel(const __grid_constant__ SceneParams s, float4 *noisy, float4 *gbuf, float4 *albedo,
+    const int width, const int height, const Camera cam, const int frame, const int spp) {
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= width || y >= height) return;
+    FirstHit first;
+    float3 irradiance;
+    path_pixel(s, 0, x, y, width, height, cam, frame, spp, first, irradiance);
+    const int idx = y * width + x;
+    noisy[idx] = to_float4(irradiance, 1.0f);
+    gbuf[idx] = make_float4(first.normal.x, first.normal.y, first.normal.z, first.depth);
+    albedo[idx] = to_float4(first.albedo, 1.0f);
+}
+
+__global__ void temporal_kernel(const int width, const int height, const Camera cam, const Camera prev, const int valid_history,
+    const float4 *noisy, const float4 *gbuf, const float4 *prev_gbuf, const float4 *hist_in, const float4 *mom_in,
+    float4 *hist_out, float4 *mom_out, float4 *filtered, const float blend_min) {
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= width || y >= height) return;
+    temporal_accumulate_pixel(x, y, width, height, cam, prev, valid_history != 0, noisy, gbuf, prev_gbuf, hist_in, mom_in,
+        hist_out, mom_out, filtered, blend_min);
+}
+
+__global__ void atrous_kernel(const int width, const int height, const float4 *in, float4 *out, const float4 *gbuf, const int step) {
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= width || y >= height) return;
+    atrous_pixel(x, y, width, height, in, out, gbuf, step);
+}
+
+__global__ void resolve_kernel(const PathParams path, const int width, const int height, const float4 *filtered, const float4 *albedo,
+    uint32_t *out) {
+    const int x = blockIdx.x * blockDim.x + threadIdx.x;
+    const int y = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= width || y >= height) return;
+    const int idx = y * width + x;
+    out[idx] = resolve_pixel(path, xyz(filtered[idx]) * xyz(albedo[idx]), path.tonemap != 0);
+}
+
 // Rotation matrix of a quaternion x, y, z, w (normalized first), row-major.
 __device__ __forceinline__ void quat_matrix(const float *q, float *r) {
     float x = q[0], y = q[1], z = q[2], w = q[3];
@@ -193,6 +252,18 @@ struct CudaResources {
     int ray_capacity_ = 0;
     int ray_input_capacity_ = 0;
 
+    // The sky's map and the tables that choose directions on it, and the denoiser's buffers (allocated when path tracing is first used).
+    float4 *d_env_map_ = nullptr;
+    float *d_env_marginal_ = nullptr;
+    float *d_env_conditional_ = nullptr;
+    float *d_env_density_ = nullptr;
+    float4 *d_noisy_ = nullptr;
+    float4 *d_albedo_ = nullptr;
+    float4 *d_gbuf_[2] = {nullptr, nullptr};
+    float4 *d_hist_[2] = {nullptr, nullptr};
+    float4 *d_mom_[2] = {nullptr, nullptr};
+    float4 *d_filt_[2] = {nullptr, nullptr};
+
     // d_textures_ is the array of handles the kernel indexes.
     std::vector<cudaArray_t> texture_arrays_;
     std::vector<cudaTextureObject_t> texture_objects_;
@@ -210,6 +281,18 @@ struct CudaResources {
         cudaFreeHost(h_pixels_);
         cudaFree(d_blas_);
         cudaFree(d_triangles_);
+        cudaFree(d_env_map_);
+        cudaFree(d_env_marginal_);
+        cudaFree(d_env_conditional_);
+        cudaFree(d_env_density_);
+        cudaFree(d_noisy_);
+        cudaFree(d_albedo_);
+        for (int k = 0; k < 2; ++k) {
+            cudaFree(d_gbuf_[k]);
+            cudaFree(d_hist_[k]);
+            cudaFree(d_mom_[k]);
+            cudaFree(d_filt_[k]);
+        }
         cudaFree(d_matrices_);
         cudaFree(d_body_of_instance_);
         cudaFree(d_local_pose_);
@@ -266,6 +349,8 @@ public:
 
         CUDA_CHECK(cudaEventCreate(&ev_start_));
         CUDA_CHECK(cudaEventCreate(&ev_stop_));
+        set_environment(Environment{});
+        set_render_mode(RenderMode::Classic, PathTracing{});
 
         for (const Texture &tex : scene.textures) upload_texture(tex);
         if (!scene.textures.empty()) {
@@ -499,6 +584,50 @@ public:
         return RayHits{Memory::Device, device_id_, count, d_hit_distance_, d_hit_normal_, d_hit_id_};
     }
 
+    void set_render_mode(const RenderMode mode, const PathTracing &settings) override {
+        mode_ = mode;
+        pt_ = settings;
+        params_.path = device::PathParams{settings.bounces, settings.max_radiance, settings.exposure, settings.tonemap ? 1 : 0};
+        have_prev_ = false;  // whatever was accumulated was made differently
+    }
+    RenderMode render_mode() const override { return mode_; }
+
+    void set_environment(const Environment &environment) override {
+        const EnvironmentTables t = build_environment_tables(environment);
+        // Replaces the old map and tables, if any.
+        cudaFree(d_env_map_);
+        cudaFree(d_env_marginal_);
+        cudaFree(d_env_conditional_);
+        cudaFree(d_env_density_);
+        d_env_map_ = nullptr;
+        d_env_marginal_ = d_env_conditional_ = d_env_density_ = nullptr;
+        if (!t.rgba.empty()) {
+            CUDA_CHECK(cudaMalloc(&d_env_map_, t.rgba.size() * sizeof(float)));
+            CUDA_CHECK(cudaMemcpy(d_env_map_, t.rgba.data(), t.rgba.size() * sizeof(float), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMalloc(&d_env_marginal_, t.marginal.size() * sizeof(float)));
+            CUDA_CHECK(cudaMemcpy(d_env_marginal_, t.marginal.data(), t.marginal.size() * sizeof(float), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMalloc(&d_env_conditional_, t.conditional.size() * sizeof(float)));
+            CUDA_CHECK(cudaMemcpy(d_env_conditional_, t.conditional.data(), t.conditional.size() * sizeof(float), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMalloc(&d_env_density_, t.density.size() * sizeof(float)));
+            CUDA_CHECK(cudaMemcpy(d_env_density_, t.density.data(), t.density.size() * sizeof(float), cudaMemcpyHostToDevice));
+        }
+        device::EnvParams &e = params_.env;
+        e.right = make_float3(t.right[0], t.right[1], t.right[2]);
+        e.up = make_float3(t.up[0], t.up[1], t.up[2]);
+        e.forward = make_float3(t.forward[0], t.forward[1], t.forward[2]);
+        e.color_up = device::to_device(environment.color_up);
+        e.color_down = device::to_device(environment.color_down);
+        e.intensity = environment.intensity;
+        e.rotation = environment.rotation;
+        e.map = d_env_map_;
+        e.map_width = environment.map_width;
+        e.map_height = environment.map_height;
+        e.marginal = d_env_marginal_;
+        e.conditional = d_env_conditional_;
+        e.density = d_env_density_;
+        have_prev_ = false;
+    }
+
     void set_ambient(const float ambient) override { params_.ambient = ambient; }
     float ambient() const override { return params_.ambient; }
     float last_kernel_ms() const override { return kernel_ms_; }
@@ -511,10 +640,51 @@ private:
         using device::BLOCK_Y;
         const dim3 block(BLOCK_X, BLOCK_Y);
         const dim3 grid((width_ + BLOCK_X - 1) / BLOCK_X, (height_ + BLOCK_Y - 1) / BLOCK_Y);
+        if (mode_ == RenderMode::PathTraced) {
+            launch_path_traced(camera, frame, samples_per_frame, block, grid);
+            return;
+        }
         device::render_kernel<<<grid, block>>>(params_, d_accum_, d_pixels_, width_, height_,
             device::to_device(camera), frame, samples_per_frame);
         // Catches a launch that never started. A fault while running surfaces at the next sync.
         CUDA_CHECK(cudaGetLastError());
+    }
+
+    // Path tracing, with or without the denoiser; see denoise_core.h for the steps.
+    void launch_path_traced(const Camera &camera, const int frame, const int spp, const dim3 block, const dim3 grid) {
+        const device::Camera cam = device::to_device(camera);
+        if (!pt_.denoise) {
+            device::path_simple_kernel<<<grid, block>>>(params_, d_accum_, d_pixels_, width_, height_, cam, frame, spp);
+            CUDA_CHECK(cudaGetLastError());
+            return;
+        }
+        const size_t n = static_cast<size_t>(width_) * height_;
+        if (d_noisy_ == nullptr) {
+            ensure(d_noisy_, n);
+            ensure(d_albedo_, n);
+            for (int k = 0; k < 2; ++k) {
+                ensure(d_gbuf_[k], n);
+                ensure(d_hist_[k], n);
+                ensure(d_mom_[k], n);
+                ensure(d_filt_[k], n);
+            }
+            have_prev_ = false;
+        }
+        const int cur = flip_, old = 1 - flip_;
+        device::path_trace_kernel<<<grid, block>>>(params_, d_noisy_, d_gbuf_[cur], d_albedo_, width_, height_, cam, frame, spp);
+        const int valid_history = frame > 0 && have_prev_ ? 1 : 0;
+        device::temporal_kernel<<<grid, block>>>(width_, height_, cam, prev_cam_, valid_history, d_noisy_, d_gbuf_[cur], d_gbuf_[old],
+            d_hist_[old], d_mom_[old], d_hist_[cur], d_mom_[cur], d_filt_[0], pt_.temporal_blend);
+        const float4 *result = d_filt_[0];
+        for (int i = 0, from = 0; i < pt_.denoise_iterations; ++i, from ^= 1) {
+            device::atrous_kernel<<<grid, block>>>(width_, height_, d_filt_[from], d_filt_[from ^ 1], d_gbuf_[cur], 1 << i);
+            result = d_filt_[from ^ 1];
+        }
+        device::resolve_kernel<<<grid, block>>>(params_.path, width_, height_, result, d_albedo_, d_pixels_);
+        CUDA_CHECK(cudaGetLastError());
+        prev_cam_ = cam;
+        have_prev_ = true;
+        flip_ ^= 1;
     }
 
     // Allocates a buffer the first time it is wanted; its size never changes after that.
@@ -606,6 +776,11 @@ private:
     int bodies_per_world_ = 0;
     int device_id_ = 0;
     device::SceneParams params_{};
+    RenderMode mode_ = RenderMode::Classic;
+    PathTracing pt_;
+    device::Camera prev_cam_{};
+    bool have_prev_ = false;
+    int flip_ = 0;
     std::unique_ptr<device::tlas::Builder> tlas_builder_;
 
     float kernel_ms_ = 0.0f;

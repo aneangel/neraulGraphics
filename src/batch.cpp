@@ -6,6 +6,7 @@
 #include <string>
 #include <neraulgraphics/batch.h>
 #include "backend.h"
+#include "environment.h"
 #include "mesh_build.h"
 #include "validate.h"
 
@@ -220,6 +221,11 @@ int BatchRenderer::instances_per_world() const { return static_cast<int>(state()
 Device BatchRenderer::device() const { return state().backend->device(); }
 Memory BatchRenderer::memory() const { return device() == Device::Cuda ? Memory::Device : Memory::Host; }
 float BatchRenderer::last_kernel_ms() const { return state().backend->last_kernel_ms(); }
+void BatchRenderer::set_environment(const Environment &environment) {
+    detail::check_environment(environment);
+    state().backend->set_environment(environment);
+}
+
 float BatchRenderer::ambient() const { return state().backend->ambient(); }
 void BatchRenderer::set_ambient(const float ambient) {
     require(finite(ambient) && ambient >= 0.0f, "ambient must be 0 or more, got " + std::to_string(ambient));

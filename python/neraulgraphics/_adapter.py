@@ -11,7 +11,8 @@ from collections.abc import Callable, Hashable, Sequence
 
 import numpy as np
 
-from ._core import Camera, Instance, Light, Material, Mesh, Renderer, Texture, Transform, make_box, make_camera
+from ._core import Camera, Environment, Instance, Light, Material, Mesh, PathTracing, RenderMode, Renderer, Texture, Transform
+from ._core import make_box, make_camera
 from ._core import make_icosphere
 
 __all__ = ["SceneBuilder", "SimRenderer", "scene_bounds"]
@@ -103,6 +104,26 @@ class SimRenderer:
     @property
     def instance_count(self) -> int:
         return self.renderer.instance_count
+
+    def beauty(self, sky=None, *, bounces: int = 4, **settings) -> None:
+        """Draws realistic pictures from now on: path tracing, with soft shadows and sky light.
+
+        ``sky`` is what lights the scene from all sides: None for a plain blue gradient, an
+        :class:`Environment`, or a ``(height, width, 3)`` float array of radiance (see
+        ``procedural_sky`` and ``load_hdr``). A sky given as an array or left out is turned to match the
+        simulator's up axis. The other ``settings`` are those of :class:`PathTracing`. Call ``render`` with
+        increasing frame numbers while the camera holds still, and the picture refines itself.
+        """
+        if sky is None:
+            sky = Environment(up=tuple(float(v) for v in self.up))
+        elif not isinstance(sky, Environment):
+            sky = Environment(up=tuple(float(v) for v in self.up), map=sky)
+        self.renderer.set_environment(sky)
+        self.renderer.set_render_mode(RenderMode.PathTraced, PathTracing(bounces=bounces, **settings))
+
+    def classic(self) -> None:
+        """Goes back to the fast, classic pictures."""
+        self.renderer.set_render_mode(RenderMode.Classic)
 
     def default_lights(self) -> list[Light]:
         """A key light high and to one side, and a dimmer fill from the other, scaled to the scene."""

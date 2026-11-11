@@ -24,12 +24,21 @@ over them, so a simulation can move thousands of bodies per frame::
     renderer = ng.Renderer(800, 450, [], lights, meshes=[ball], instances=bodies)
     renderer.set_instance_transforms(matrices)  # (N, 3, 4) float array, every frame
 
+Beauty mode traces light bouncing between surfaces, with soft shadows, physically based materials
+and a sky that lights the scene, and denoises it so a few samples per pixel look clean::
+
+    renderer.set_render_mode(ng.RenderMode.PathTraced, ng.PathTracing(bounces=4))
+    renderer.set_environment(ng.Environment(up=(0, 0, 1)))  # or map=ng.load_hdr("sky.hdr")
+    for frame in range(64):  # the denoiser reuses earlier frames while the camera holds still
+        image = renderer.render(camera, frame)
+
 It traces on an NVIDIA GPU when there is one and on the CPU otherwise (``device="cpu"``
 forces the CPU), drawing the same picture either way. Errors in the scene raise ValueError; a failure
 inside CUDA raises neraulgraphics.CudaError.
 """
 
 from .loaders import LoadedScene, SceneRenderer, load, load_gltf, load_obj
+from .sky import load_hdr, procedural_sky
 from ._core import (
     MAX_LIGHTS,
     MAX_SPHERES,
@@ -40,11 +49,14 @@ from ._core import (
     BatchRenderer,
     Camera,
     CudaError,
+    Environment,
     Instance,
     Light,
     Material,
     Mesh,
+    PathTracing,
     Plane,
+    RenderMode,
     Renderer,
     Sphere,
     Texture,
@@ -64,6 +76,8 @@ __all__ = [
     "load",
     "load_gltf",
     "load_obj",
+    "load_hdr",
+    "procedural_sky",
     "MAX_LIGHTS",
     "MAX_SPHERES",
     "OBJECT_FLOOR",
@@ -73,11 +87,14 @@ __all__ = [
     "BatchRenderer",
     "Camera",
     "CudaError",
+    "Environment",
     "Instance",
     "Light",
     "Material",
     "Mesh",
+    "PathTracing",
     "Plane",
+    "RenderMode",
     "Renderer",
     "Sphere",
     "Texture",

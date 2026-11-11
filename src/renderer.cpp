@@ -10,6 +10,7 @@
 #include <neraulgraphics/renderer.h>
 #include "backend.h"
 #include "mesh_build.h"
+#include "environment.h"
 #include "validate.h"
 
 namespace neraulgraphics {
@@ -125,6 +126,25 @@ void Renderer::set_ambient(const float ambient) {
 }
 
 float Renderer::ambient() const { return state().backend->ambient(); }
+
+void Renderer::set_render_mode(const RenderMode mode, const PathTracing &p) {
+    Impl &r = state();
+    require(mode == RenderMode::Classic || mode == RenderMode::PathTraced, "unknown render mode");
+    require(p.bounces >= 0 && p.bounces <= 32, "bounces must be 0 to 32, got " + std::to_string(p.bounces));
+    require(finite(p.exposure) && p.exposure > 0.0f, "exposure must be positive, got " + std::to_string(p.exposure));
+    require(finite(p.max_radiance) && p.max_radiance >= 0.0f, "max_radiance must be 0 or more, got " + std::to_string(p.max_radiance));
+    require(p.denoise_iterations >= 0 && p.denoise_iterations <= 8, "denoise_iterations must be 0 to 8, got " + std::to_string(p.denoise_iterations));
+    require(finite(p.temporal_blend) && p.temporal_blend > 0.0f && p.temporal_blend <= 1.0f,
+        "temporal_blend must be in (0, 1], got " + std::to_string(p.temporal_blend));
+    r.backend->set_render_mode(mode, p);
+}
+
+RenderMode Renderer::render_mode() const { return state().backend->render_mode(); }
+
+void Renderer::set_environment(const Environment &environment) {
+    detail::check_environment(environment);
+    state().backend->set_environment(environment);
+}
 
 Frame Renderer::render_frame(const Camera &camera, const int frame, const int samples_per_frame,
     const unsigned outputs) {

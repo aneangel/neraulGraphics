@@ -73,6 +73,7 @@ add_library(neraulgraphics_core STATIC
     src/renderer.cpp
     src/batch.cpp
     src/validate.cpp
+    src/environment.cpp
     src/cpu_backend.cpp
     src/instances.cpp
     src/bvh.cpp
@@ -162,6 +163,13 @@ if (NERAULGRAPHICS_BUILD_TESTS)
     target_compile_options(neraulgraphics-batch-tests PRIVATE
         $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:-ffast-math>)
     add_test(NAME batch COMMAND neraulgraphics-batch-tests)
+
+    # The path tracer and its denoiser: closed-form checks of light transport.
+    add_executable(neraulgraphics-path-tests tests/test_path.cpp)
+    target_link_libraries(neraulgraphics-path-tests PRIVATE neraulgraphics::core)
+    target_compile_options(neraulgraphics-path-tests PRIVATE
+        $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:CXX>>:-ffast-math>)
+    add_test(NAME path COMMAND neraulgraphics-path-tests)
 endif()
 
 # ----------------------------------------------------------------- python --

@@ -72,6 +72,11 @@ public:
     virtual void set_ambient(float ambient) = 0;
     virtual float ambient() const = 0;
 
+    // Already validated.
+    virtual void set_render_mode(RenderMode mode, const PathTracing &settings) = 0;
+    virtual RenderMode render_mode() const = 0;
+    virtual void set_environment(const Environment &environment) = 0;
+
     // GPU time for CUDA, wall time for the CPU.
     virtual float last_kernel_ms() const = 0;
     virtual Device device() const = 0;

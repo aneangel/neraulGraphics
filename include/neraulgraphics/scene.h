@@ -5,6 +5,8 @@
 // library needs neither nvcc nor the CUDA headers. The renderer converts these
 // to its own device layout when a Renderer is created.
 
+#include <vector>
+
 namespace neraulgraphics {
 
 // A scene is passed to the kernel by value, and kernel parameters have a fixed
@@ -36,6 +38,13 @@ struct Material {
     float specular_albedo;
     float reflectivity;  // 0 = matte, 1 = perfect mirror
     float specular_exponent;
+
+    // Physically based parameters, which path tracing uses (the classic renderer ignores them). A
+    // negative value means: work it out from the classic fields above, so every existing material
+    // has a sensible physical meaning. Metals take their colour from diffuse_color.
+    float roughness = -1.0f;  // 0 is mirror-smooth and 1 fully rough. Classic: from specular_exponent
+    float metallic = -1.0f;   // 0 is a dielectric (paint, plastic) and 1 a metal. Classic: reflectivity
+    Vec3 emission = {0.0f, 0.0f, 0.0f};  // light the surface gives off, as radiance in linear units
 };
 
 inline Material make_material(const Vec3 color, const float kd, const float ks, const float kr,
@@ -65,6 +74,24 @@ struct Plane {
     float z_max;
     float checker_scale;
     Material material;
+};
+
+// The light that comes from the sky: what a ray that leaves the scene sees, and what lights the surfaces it
+// leaves behind. A gradient by default (the sky of the classic renderer). A map replaces the gradient with a
+// picture of the whole sky, such as a photographed HDRI, which is also what lights the scene: a path tracer
+// samples it in proportion to its brightness, so even a small, bright sun is found at once.
+struct Environment {
+    Vec3 up = {0.0f, 1.0f, 0.0f};            // the world's up axis, which the sky is brighter or darker along
+    Vec3 color_up = {0.10f, 0.26f, 0.60f};   // the gradient's colour straight up
+    Vec3 color_down = {0.35f, 0.52f, 0.70f}; // and straight down; halfway between at the horizon
+    float intensity = 1.0f;                  // scales the gradient's or the map's radiance
+    // An equirectangular map: map_width x map_height pixels of 3 floats (red, green, blue, in linear
+    // radiance), rows from the top (straight up) to the bottom (straight down), the columns going round
+    // the up axis. Empty for no map.
+    int map_width = 0;
+    int map_height = 0;
+    std::vector<float> map;
+    float rotation = 0.0f;                   // radians the map is turned about the up axis
 };
 
 // Build with make_camera. The basis and fov_scale are precomputed there so the

@@ -18,6 +18,9 @@ struct Material {
     float specular_albedo;
     float reflectivity;
     float specular_exponent;
+    float roughness;  // < 0: derive from specular_exponent
+    float metallic;   // < 0: derive from reflectivity
+    float3 emission;
 };
 
 struct Sphere {
@@ -56,7 +59,7 @@ inline Vec3 to_public(const float3 &v) { return Vec3{v.x, v.y, v.z}; }
 
 inline Material to_device(const neraulgraphics::Material &m) {
     return Material{to_device(m.diffuse_color), m.diffuse_albedo, m.specular_albedo,
-        m.reflectivity, m.specular_exponent};
+        m.reflectivity, m.specular_exponent, m.roughness, m.metallic, to_device(m.emission)};
 }
 
 inline Sphere to_device(const neraulgraphics::Sphere &s) {
