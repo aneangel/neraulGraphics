@@ -54,6 +54,7 @@ option(NERAULGRAPHICS_BUILD_VIEWER "Build the interactive SDL2 viewer" ${PROJECT
 option(NERAULGRAPHICS_BUILD_TESTS "Build the C++ tests (run with ctest)" ${PROJECT_IS_TOP_LEVEL})
 option(NERAULGRAPHICS_INSTALL "Generate install rules and the find_package config" ${PROJECT_IS_TOP_LEVEL})
 option(NERAULGRAPHICS_BUILD_PYTHON "Build the Python module (pip install . sets this)" OFF)
+option(NERAULGRAPHICS_BUILD_VULKAN "Build the Vulkan ray-query prototype in tools/vulkan (portable backend, milestone V0)" OFF)
 option(NERAULGRAPHICS_BUILD_PHYSICS "Build the deterministic physics module, neraulgraphics._physics (needs the Python module; fetches Jolt Physics)" OFF)
 
 # Shared links libcudart.so, which the machine running the program must have.
@@ -232,6 +233,20 @@ if (NERAULGRAPHICS_BUILD_PYTHON)
         endif()
         install(TARGETS _physics LIBRARY DESTINATION neraulgraphics)
     endif()
+endif()
+
+# ----------------------------------------------------------------- vulkan --
+# The portable backend's first milestone: acceleration structures and ray queries on any Vulkan device, checked against the CPU.
+# tools/vulkan/compare.py runs it on every device and compares what each ray hits with the CPU reference.
+
+if (NERAULGRAPHICS_BUILD_VULKAN)
+    find_package(Vulkan REQUIRED COMPONENTS glslc)
+    add_executable(vk_rayquery tools/vulkan/rayquery.cpp)
+    target_link_libraries(vk_rayquery PRIVATE Vulkan::Vulkan)
+    add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/rayquery.spv
+        COMMAND Vulkan::glslc --target-env=vulkan1.3 -O ${CMAKE_SOURCE_DIR}/tools/vulkan/rayquery.comp -o ${CMAKE_BINARY_DIR}/rayquery.spv
+        DEPENDS tools/vulkan/rayquery.comp)
+    add_custom_target(vk_rayquery_shader ALL DEPENDS ${CMAKE_BINARY_DIR}/rayquery.spv)
 endif()
 
 # ---------------------------------------------------------------- install --

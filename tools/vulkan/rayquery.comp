@@ -1,0 +1,35 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 The neraulGraphics Developers
+// SPDX-License-Identifier: Apache-2.0
+//
+// Closest-hit visibility for a batch of rays, using the inline ray queries of VK_KHR_ray_query: the same shader runs on the RT cores of
+// an NVIDIA GPU, the ray accelerators of an AMD one, and the software implementation of llvmpipe. The work group size is a fixed
+// 64 and nothing here depends on the subgroup size, which is 32, 64 or 8 on the three devices this was written against.
+#version 460
+#extension GL_EXT_ray_query : require
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
+layout(set = 0, binding = 1) readonly buffer Rays { float v[]; } rays;      // origin xyz, direction xyz (unit length) per ray
+layout(set = 0, binding = 2) writeonly buffer Hits { uint v[]; } hits;       // per ray: the distance as float bits, then the instance (or ~0)
+
+layout(push_constant) uniform Constants { uint count; } pc;
+
+void main() {
+    const uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.count) return;
+    const vec3 origin = vec3(rays.v[6 * i], rays.v[6 * i + 1], rays.v[6 * i + 2]);
+    const vec3 direction = vec3(rays.v[6 * i + 3], rays.v[6 * i + 4], rays.v[6 * i + 5]);
+
+    rayQueryEXT query;
+    rayQueryInitializeEXT(query, tlas, gl_RayFlagsOpaqueEXT, 0xFF, origin, 1.0e-4, direction, 1.0e30);
+    while (rayQueryProceedEXT(query)) {}
+
+    if (rayQueryGetIntersectionTypeEXT(query, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
+        hits.v[2 * i] = floatBitsToUint(rayQueryGetIntersectionTEXT(query, true));
+        hits.v[2 * i + 1] = uint(rayQueryGetIntersectionInstanceCustomIndexEXT(query, true));
+    } else {
+        hits.v[2 * i] = floatBitsToUint(-1.0);
+        hits.v[2 * i + 1] = 0xFFFFFFFFu;
+    }
+}

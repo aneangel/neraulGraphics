@@ -20,6 +20,9 @@ version (0.x.0) may change the API.
   Physics built for cross-platform determinism solves the contacts, and nothing else changes the simulation. `state_hash()` fingerprints
   every body's exact state. Built only with `-C cmake.define.NERAULGRAPHICS_BUILD_PHYSICS=ON` (it fetches Jolt). A golden hash in
   `tests/test_physics.py` enforces it; `docs/guide.md` says what is and is not guaranteed.
+- The portable backend, milestone V0 (`tools/vulkan`, `docs/portable-backend.md`): acceleration structures and inline ray queries on any
+  Vulkan device. On an NVIDIA RTX 5090, an AMD Radeon iGPU and the llvmpipe software device it agrees with the CPU backend on 99.9996 to
+  99.9999 % of a million rays, and traces 5,400, 49 and 12.5 Mrays/s respectively. Opt-in with `-DNERAULGRAPHICS_BUILD_VULKAN=ON`.
 - `neraulgraphics.Smoke`: dust as a volume. Particles are splatted as Gaussian blobs of optical depth, composited with Beer-Lambert absorption
   and hidden by a ray cast when they are behind a surface, so clouds are translucent where spheres were opaque.
 - Procedural surface textures (`examples/scenery/textures.py`): brick with per-brick tone and mortar, speckled asphalt, stained concrete and
