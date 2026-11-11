@@ -286,6 +286,10 @@ public:
         return RayHits{Memory::Host, 0, count, ray_distance_.data(), ray_normal_.data(), ray_id_.data()};
     }
 
+    void set_lights(const std::vector<Light> &lights) override {
+        for (size_t i = 0; i < lights.size(); ++i) params_.lights[i] = host::to_device(lights[i]);
+        params_.light_count = static_cast<int>(lights.size());
+    }
     void set_ambient(const float ambient) override { params_.ambient = ambient; }
     float ambient() const override { return params_.ambient; }
 

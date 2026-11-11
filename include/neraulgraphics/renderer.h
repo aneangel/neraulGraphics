@@ -228,6 +228,9 @@ public:
     // accumulated image should be restarted with frame 0, as for any scene change.
     //
     // Throws std::invalid_argument, changing nothing, if ambient is negative, NaN or infinite.
+    // Replaces the scene's lights, at most MAX_LIGHTS: a flashlight that follows a camera, a lamp that flickers. Cheap, so it can be
+    // done every frame. Throws std::invalid_argument for a NaN, a negative radius or too many.
+    void set_lights(const std::vector<Light> &lights);
     void set_ambient(float ambient);
     float ambient() const;
 

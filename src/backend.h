@@ -69,6 +69,8 @@ public:
     virtual RayHits cast_rays_batch(const float *origins, const float *directions, int rays_per_world,
         float max_distance, Memory input_memory) = 0;
 
+    // Replaces the lights (already validated). Takes effect on the next frame.
+    virtual void set_lights(const std::vector<Light> &lights) = 0;
     virtual void set_ambient(float ambient) = 0;
     virtual float ambient() const = 0;
 

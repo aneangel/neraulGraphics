@@ -490,15 +490,26 @@ NB_MODULE(_core, m) {
                 repr(s.material) + ")";
         });
 
-    nb::class_<Light>(m, "Light", "A spherical light. radius 0 gives hard shadows, above 0 soft ones.")
+    nb::class_<Light>(m, "Light",
+        "A spherical light. radius 0 gives hard shadows, above 0 soft ones.\n\n"
+        "A plain light's intensity does not fall with distance, like the sun's. falloff makes it a lamp: the intensity is divided "
+        "by 1 + (distance / falloff)^2. spot_angle (the cone's half-angle in radians) makes it a spotlight along direction, "
+        "fading out over the outer spot_softness of the cone. color (r, g, b, default white) tints it.")
         .def("__init__",
-            [](Light *self, const Vec3 &position, const float intensity, const float radius) {
-                new (self) Light{position, intensity, radius};
+            [](Light *self, const Vec3 &position, const float intensity, const float radius, const float falloff, const Vec3 &direction,
+                const float spot_angle, const float spot_softness, const Vec3 &color) {
+                new (self) Light{position, intensity, radius, falloff, direction, spot_angle, spot_softness, color};
             },
-            "position"_a, "intensity"_a = 1.0f, "radius"_a = 0.0f)
+            "position"_a, "intensity"_a = 1.0f, "radius"_a = 0.0f, "falloff"_a = 0.0f, "direction"_a = Vec3{0.0f, 0.0f, -1.0f},
+            "spot_angle"_a = 0.0f, "spot_softness"_a = 0.25f, "color"_a = Vec3{1.0f, 1.0f, 1.0f})
         .def_rw("position", &Light::position)
         .def_rw("intensity", &Light::intensity)
         .def_rw("radius", &Light::radius)
+        .def_rw("falloff", &Light::falloff)
+        .def_rw("direction", &Light::direction)
+        .def_rw("spot_angle", &Light::spot_angle)
+        .def_rw("spot_softness", &Light::spot_softness)
+        .def_rw("color", &Light::color)
         .def("__repr__", [](const Light &l) {
             return "Light(position=" + fmt(l.position) + ", intensity=" + fmt(l.intensity) +
                 ", radius=" + fmt(l.radius) + ")";
@@ -809,6 +820,15 @@ NB_MODULE(_core, m) {
         .def("set_instance_transforms", &set_instance_transform_list, "transforms"_a,
             "The same, from a list of Transform objects.")
         .def_prop_ro("instance_count", [](PyRenderer &self) { return self.renderer.instance_count(); })
+        .def("set_lights",
+            [](PyRenderer &self, const std::vector<Light> &lights) {
+                std::lock_guard<std::mutex> lock(self.mutex);
+                self.renderer.set_lights(lights);
+            },
+            "lights"_a,
+            "Replaces the lights (at most MAX_LIGHTS): a flashlight that follows a camera, a lamp that flickers. Cheap enough "
+            "to call every frame. With path tracing and a still camera, render with frame=0 afterwards so that the denoiser "
+            "starts afresh.")
         .def_prop_rw("ambient",
             [](PyRenderer &self) {
                 std::lock_guard<std::mutex> lock(self.mutex);

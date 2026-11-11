@@ -210,8 +210,8 @@ NG_FN float3 trace(const SceneParams &s, const int world, float3 origin, float3 
             break;
         }
 
-        float diffuse = 0.0f;
-        float specular = 0.0f;
+        float3 diffuse = make_float3(0.0f, 0.0f, 0.0f);
+        float3 specular = make_float3(0.0f, 0.0f, 0.0f);
         for (int i = 0; i < s.light_count; ++i) {
             // Sampling a random point on the light is what softens the shadow.
             const float3 lp = sample_sphere_light(s.lights[i].position, s.lights[i].radius, rng);
@@ -219,17 +219,20 @@ NG_FN float3 trace(const SceneParams &s, const int world, float3 origin, float3 
             const float light_distance = length(to_light);
             const float3 light_dir = to_light * (1.0f / light_distance);
 
+            const float strength = s.lights[i].intensity * light_factor(s.lights[i], light_dir, light_distance);
+            if (strength <= 0.0f) continue;
             if (scene_occluded(s, world, offset_origin(hit.point, hit.normal, light_dir), light_dir,
                 light_distance))
                 continue;
 
-            diffuse += s.lights[i].intensity * fmaxf(0.0f, dot(light_dir, hit.normal));
-            specular += fast_pow(fmaxf(0.0f, dot(reflect(light_dir, hit.normal), dir)),
-                            hit.material.specular_exponent) * s.lights[i].intensity;
+            const float3 lit = s.lights[i].color * strength;
+            diffuse += lit * fmaxf(0.0f, dot(light_dir, hit.normal));
+            specular += lit * fast_pow(fmaxf(0.0f, dot(reflect(light_dir, hit.normal), dir)),
+                            hit.material.specular_exponent);
         }
 
         const float3 direct = hit.material.diffuse_color * (diffuse * hit.material.diffuse_albedo) +
-            make_float3(1.0f, 1.0f, 1.0f) * (specular * hit.material.specular_albedo);
+            specular * hit.material.specular_albedo;
         radiance += (direct + hit.material.diffuse_color * (s.ambient * hit.material.diffuse_albedo)) * throughput;
 
         throughput *= hit.material.reflectivity;

@@ -7,6 +7,7 @@
 // share names with the public types so the device code, which sits in this
 // namespace, reads the same as before the split.
 
+#include <cmath>
 #include <neraulgraphics/scene.h>
 #include "geom_dev.h"
 
@@ -33,6 +34,11 @@ struct Light {
     float3 position;
     float intensity;
     float radius;
+    float falloff;      // 0: the intensity does not fall with distance
+    float3 direction;   // unit, where a spotlight points
+    float cos_outer;    // cosine of the cone's half-angle; below -1.5 means no cone
+    float cos_inner;    // the cosine inside which the light is at full strength
+    float3 color;       // multiplies intensity
 };
 
 struct Plane {
@@ -67,7 +73,12 @@ inline Sphere to_device(const neraulgraphics::Sphere &s) {
 }
 
 inline Light to_device(const neraulgraphics::Light &l) {
-    return Light{to_device(l.position), l.intensity, l.radius};
+    float3 d = to_device(l.direction);
+    const float n = std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z);
+    d = n > 0.0f ? make_float3(d.x / n, d.y / n, d.z / n) : make_float3(0.0f, 0.0f, -1.0f);
+    const bool spot = l.spot_angle > 0.0f;
+    return Light{to_device(l.position), l.intensity, l.radius, l.falloff, d,
+        spot ? std::cos(l.spot_angle) : -2.0f, spot ? std::cos(l.spot_angle * (1.0f - l.spot_softness)) : -2.0f, to_device(l.color)};
 }
 
 inline Plane to_device(const neraulgraphics::Plane &p) {
@@ -77,6 +88,24 @@ inline Plane to_device(const neraulgraphics::Plane &p) {
 inline Camera to_device(const neraulgraphics::Camera &c) {
     return Camera{to_device(c.position), to_device(c.right), to_device(c.up), to_device(c.forward),
         c.fov_scale, c.aspect};
+}
+
+// How much of a light's intensity reaches a point d away from it, towards_light being the unit vector from the point to the light: a
+// lamp's falloff with distance and a spotlight's cone (smooth from full strength inside cos_inner to nothing at cos_outer). 1 for the
+// plain lights that have neither.
+GPU_FN float light_factor(const Light &l, const float3 &towards_light, const float d) {
+    float f = 1.0f;
+    if (l.falloff > 0.0f) {
+        const float q = d / l.falloff;
+        f = 1.0f / (1.0f + q * q);
+    }
+    if (l.cos_outer > -1.5f) {
+        // the light points along direction; the point is in the cone when the direction from the light to it agrees
+        const float c = -(l.direction.x * towards_light.x + l.direction.y * towards_light.y + l.direction.z * towards_light.z);
+        const float t = fminf(fmaxf((c - l.cos_outer) / fmaxf(l.cos_inner - l.cos_outer, 1e-6f), 0.0f), 1.0f);
+        f *= t * t * (3.0f - 2.0f * t);
+    }
+    return f;
 }
 
 // Primary ray direction. px/py are continuous, so passing x + jitter anti-aliases.

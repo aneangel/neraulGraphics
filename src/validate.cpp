@@ -36,12 +36,32 @@ void check_frame_size(const int width, const int height) {
         "frame of " + std::to_string(width) + "x" + std::to_string(height) + " pixels is too large");
 }
 
+void check_lights(const std::vector<Light> &lights) {
+    require(lights.size() <= MAX_LIGHTS, "scene has " + std::to_string(lights.size()) +
+        " lights, at most " + std::to_string(MAX_LIGHTS) + " fit");
+    for (size_t i = 0; i < lights.size(); ++i) {
+        const Light &l = lights[i];
+        const std::string name = "light " + std::to_string(i);
+        require(finite(l.position) && finite(l.intensity) && finite(l.radius),
+            name + " has a NaN or infinite value");
+        require(l.radius >= 0.0f, name + " radius must be 0 or more, got " +
+            std::to_string(l.radius));
+        require(finite(l.falloff) && l.falloff >= 0.0f, name + " falloff must be 0 or more, got " + std::to_string(l.falloff));
+        require(finite(l.direction) && finite(l.spot_angle) && finite(l.spot_softness), name + " has a NaN or infinite value");
+        require(l.spot_angle >= 0.0f && l.spot_angle < 3.14159f, name + " spot_angle must be 0 (no cone) to below pi radians, got " +
+            std::to_string(l.spot_angle));
+        require(finite(l.color) && l.color.x >= 0.0f && l.color.y >= 0.0f && l.color.z >= 0.0f, name + " color must be finite and not negative");
+        require(l.spot_softness >= 0.0f && l.spot_softness <= 1.0f, name + " spot_softness must be 0 to 1, got " + std::to_string(l.spot_softness));
+        require(l.spot_angle == 0.0f || l.direction.x != 0.0f || l.direction.y != 0.0f || l.direction.z != 0.0f,
+            name + " is a spotlight (spot_angle > 0) but its direction is zero");
+    }
+}
+
 void check_scene(const std::vector<Sphere> &spheres, const std::vector<Light> &lights,
     const Plane &floor) {
     require(spheres.size() <= MAX_SPHERES, "scene has " + std::to_string(spheres.size()) +
         " spheres, at most " + std::to_string(MAX_SPHERES) + " fit");
-    require(lights.size() <= MAX_LIGHTS, "scene has " + std::to_string(lights.size()) +
-        " lights, at most " + std::to_string(MAX_LIGHTS) + " fit");
+    check_lights(lights);
 
     for (size_t i = 0; i < spheres.size(); ++i) {
         const Sphere &sp = spheres[i];
@@ -51,14 +71,6 @@ void check_scene(const std::vector<Sphere> &spheres, const std::vector<Light> &l
         // A zero radius makes the hit normal 0/0.
         require(sp.radius > 0.0f, name + " radius must be positive, got " +
             std::to_string(sp.radius));
-    }
-    for (size_t i = 0; i < lights.size(); ++i) {
-        const Light &l = lights[i];
-        const std::string name = "light " + std::to_string(i);
-        require(finite(l.position) && finite(l.intensity) && finite(l.radius),
-            name + " has a NaN or infinite value");
-        require(l.radius >= 0.0f, name + " radius must be 0 or more, got " +
-            std::to_string(l.radius));
     }
     require(finite(floor.y) && finite(floor.half_extent_x) && finite(floor.z_min) &&
         finite(floor.z_max) && finite(floor.checker_scale), "floor has a NaN or infinite value");

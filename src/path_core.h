@@ -197,6 +197,8 @@ NG_FN float3 direct_from_lights(const SceneParams &s, const int world, const Hit
         const float d2 = dot(to_light, to_light);
         const float d = sqrtf(d2);
         const float3 axis = to_light * (1.0f / d);
+        const float strength = l.intensity * light_factor(l, axis, d);
+        if (strength <= 0.0f) continue;
         float3 wi = axis;
         float reach = d;  // how far a shadow ray must be clear
         if (l.radius > 1e-4f && l.radius < d * 0.999f) {
@@ -215,7 +217,7 @@ NG_FN float3 direct_from_lights(const SceneParams &s, const int world, const Hit
         const float3 f = brdf_eval(surf, n, wo, wi, pdf);
         if (max_component(f) <= 0.0f) continue;
         if (scene_occluded(s, world, offset_origin(hit.point, n, wi), wi, reach)) continue;
-        sum += f * (nol * PI * l.intensity);
+        sum += f * l.color * (nol * PI * strength);
     }
     return sum;
 }

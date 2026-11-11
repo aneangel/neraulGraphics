@@ -628,6 +628,10 @@ public:
         have_prev_ = false;
     }
 
+    void set_lights(const std::vector<Light> &lights) override {
+        for (size_t i = 0; i < lights.size(); ++i) params_.lights[i] = device::to_device(lights[i]);
+        params_.light_count = static_cast<int>(lights.size());
+    }
     void set_ambient(const float ambient) override { params_.ambient = ambient; }
     float ambient() const override { return params_.ambient; }
     float last_kernel_ms() const override { return kernel_ms_; }

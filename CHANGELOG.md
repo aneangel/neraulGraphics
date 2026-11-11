@@ -9,6 +9,10 @@ version (0.x.0) may change the API.
 ## [Unreleased]
 
 ### Added
+- Moving, shaped lights. `Renderer.set_lights(lights)` replaces a scene's lights between frames (a torch that follows a camera). `Light` gains
+  `falloff` (intensity / (1 + (d / falloff)^2), a lamp), `direction`, `spot_angle` and `spot_softness` (a spotlight with a smooth cone) and
+  `color` (a warm torch or a flame). All default to what a plain light was, so existing scenes draw identically; classic and path-traced
+  shading share one `light_factor`, CPU and CUDA agree, and every field is validated (`tests/test_lights.py`).
 - Normal maps and occlusion/roughness/metal maps. `Instance(normal_texture=, orm_texture=)` and `Texture(image, linear=True)` for data that must not
   be sRGB-decoded. A tangent frame is built from the triangle's uvs inside `mesh_surface`, the one function both backends share, so the CPU and
   CUDA backends draw them identically (tested). Roughness and metal reach the path tracer, occlusion darkens the diffuse colour. The street

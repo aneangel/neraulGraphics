@@ -22,6 +22,7 @@ bool finite(const Material &m);
 void check_material(const Material &m, const std::string &name);
 
 void check_frame_size(int width, int height);
+void check_lights(const std::vector<Light> &lights);
 void check_scene(const std::vector<Sphere> &spheres, const std::vector<Light> &lights, const Plane &floor);
 void check_render_args(const Camera &camera, int frame, int samples_per_frame);
 

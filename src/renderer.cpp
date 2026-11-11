@@ -136,6 +136,12 @@ void Renderer::set_instance_matrices(const float *matrices, const Memory memory)
 
 int Renderer::instance_count() const { return state().instances; }
 
+void Renderer::set_lights(const std::vector<Light> &lights) {
+    Impl &r = state();
+    detail::check_lights(lights);
+    r.backend->set_lights(lights);
+}
+
 void Renderer::set_ambient(const float ambient) {
     Impl &r = state();
     require(finite(ambient) && ambient >= 0.0f, "ambient must be 0 or more, got " + std::to_string(ambient));

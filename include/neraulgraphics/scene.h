@@ -59,10 +59,21 @@ struct Sphere {
 };
 
 // radius 0 is a point light (hard shadows); above 0 gives soft shadows.
+//
+// By default a light's intensity does not fall with distance, like the sun's. falloff makes it a lamp: the intensity is divided by
+// 1 + (distance / falloff)^2, so it has fallen to half at a distance of falloff. spot_angle (the half-angle of the cone, in radians,
+// below pi) makes it a spotlight pointing along direction, fading from full strength to nothing over the outer spot_softness of the cone.
+// With falloff 0 and spot_angle 0, which is what a plain Light(position, intensity, radius) has, nothing changes.
 struct Light {
     Vec3 position;
     float intensity;
     float radius;
+    float falloff = 0.0f;
+    Vec3 direction = {0.0f, 0.0f, -1.0f};
+    float spot_angle = 0.0f;
+    float spot_softness = 0.25f;
+    // The colour of the light, multiplying intensity: (1, 1, 1) is white, (1, 0.7, 0.4) a warm torch or a flame.
+    Vec3 color = {1.0f, 1.0f, 1.0f};
 };
 
 // Finite axis-aligned checkerboard floor at constant y. A zero half_extent_x
